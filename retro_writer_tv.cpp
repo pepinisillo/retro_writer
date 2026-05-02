@@ -49,13 +49,7 @@ extern TColorAttr shadowAttr;
 
 namespace {
 
-const int cmNewNovel = 1001;
-const int cmNewChapter = 1002;
 const int cmWelcome = 1003;
-const int cmPrevNovel = 1004;
-const int cmNextNovel = 1005;
-const int cmPrevChapter = 1006;
-const int cmNextChapter = 1007;
 const int cmNavigator = 1008;
 const int cmRefreshWidgets = 1009;
 const int cmPreferences = 1010;
@@ -71,16 +65,6 @@ const int cmCreateTxtFile = 1017;
 static const short kFilePanelRightX = 33;
 
 const int MAX_TITLE = 96;
-
-struct EntryMeta {
-    std::string key;
-    std::string title;
-};
-
-static bool ensureDir(const std::string &path) {
-    if (mkdir(path.c_str(), 0755) == 0) return true;
-    return errno == EEXIST;
-}
 
 static std::string joinPath(const std::string &a, const std::string &b) {
     if (!a.empty() && (a.back() == '/' || a.back() == '\\')) return a + b;
@@ -138,16 +122,6 @@ static std::string hexToUtf8(const std::string &hexIn) {
         if (hi < 0 || lo < 0) continue;
         out.push_back(static_cast<char>(static_cast<unsigned char>((hi << 4) | lo)));
     }
-    return out;
-}
-
-static std::string slugify(const std::string &s) {
-    std::string out;
-    for (unsigned char c : s) {
-        if (std::isalnum(c)) out.push_back((char)std::tolower(c));
-        else if (c == ' ' || c == '-' || c == '_') out.push_back('_');
-    }
-    if (out.empty()) out = "novela";
     return out;
 }
 
@@ -1198,14 +1172,6 @@ public:
             return TColorAttr(0x00);
         return TDialog::mapColor(index);
     }
-
-    virtual void handleEvent(TEvent &event) override {
-        TDialog::handleEvent(event);
-        if (event.what == evCommand && event.message.command == cmNewNovel) {
-            endModal(cmNewNovel);
-            clearEvent(event);
-        }
-    }
 };
 
 class UnicodeBackground : public TBackground {
@@ -1247,24 +1213,14 @@ public:
                   &RetroWriterTVApp::initMenuBar,
                   &RetroWriterTVApp::initDeskTop),
         projectDir(projectDir),
-        novelsDir(joinPath(projectDir, "novelas")),
-        novelsIndexPath(joinPath(projectDir, "novelas.idx")),
         preferencesPath(joinPath(projectDir, "appearance.cfg")),
         workspacePath(joinPath(projectDir, "workspace.cfg")) {
         loadAppearancePreferences();
         fillPaletteExplicit(textColor, backColor, paletteBytes);
-        browserDir = absolutePath(this->projectDir);
+        /* Panel de archivos: por defecto raiz del sistema; workspace.cfg restaura cwd si existe. */
+        browserDir = absolutePath("/");
         lastEditorPath.clear();
-        loadNovelsIndex();
-        if (novels.empty()) {
-            createNovel("Novela 1");
-            createChapter("Capitulo 1");
-        } else {
-            if (!loadWorkspaceSession()) {
-                switchNovel(0);
-                if (chapters.empty()) createChapter("Capitulo 1");
-            }
-        }
+        loadWorkspaceSession();
         createDesktopWidgets();
         if (!lastEditorPath.empty()) {
             std::ifstream chk(lastEditorPath);
@@ -1272,14 +1228,12 @@ public:
                 openFileInEditor(lastEditorPath);
             else {
                 lastEditorPath.clear();
-                openCurrentChapter();
+                openFileInEditor("");
             }
         } else {
-            openCurrentChapter();
+            openFileInEditor("");
         }
         applyDesktopPatternChar();
-        // La bienvenida se muestra en idle() tras run(): un execView modal
-        // desde el constructor deja a veces sin repintar navegador y editor.
     }
 
     static TMenuBar *initMenuBar(TRect r) {
@@ -1287,19 +1241,12 @@ public:
         return new TMenuBar(
             r,
             *new TSubMenu("~F~ile", kbAltF) +
-                *new TMenuItem("~N~ueva novela...", cmNewNovel, kbCtrlN, hcNoContext, "Ctrl-N") +
-                *new TMenuItem("Nuevo ~c~apitulo...", cmNewChapter, kbCtrlC, hcNoContext, "Ctrl-C") +
-                newLine() +
                 *new TMenuItem("~B~ienvenida", cmWelcome, kbF2, hcNoContext, "F2") +
                 *new TMenuItem("E~x~it", cmQuit, kbAltX, hcNoContext, "Alt-X") +
                 *new TMenuItem("Salir rapido", cmQuit, kbCtrlQ, hcNoContext, "Ctrl-Q") +
             *new TSubMenu("~W~indows", kbAltW) +
                 *new TMenuItem("File ~M~anager", cmNavigator, kbF4, hcNoContext, "F4") +
                 *new TMenuItem("Panel archivos (~E~)", cmToggleFilePanel, kbCtrlE, hcNoContext, "Ctrl-E") +
-                *new TMenuItem("Nove~l~a anterior", cmPrevNovel, kbF7, hcNoContext, "F7") +
-                *new TMenuItem("Novela ~s~iguiente", cmNextNovel, kbF8, hcNoContext, "F8") +
-                *new TMenuItem("Capitulo anterior", cmPrevChapter, kbAltJ, hcNoContext, "Alt-J") +
-                *new TMenuItem("Capitulo siguiente", cmNextChapter, kbAltK, hcNoContext, "Alt-K") +
                 newLine() +
                 *new TMenuItem("Refrescar paneles", cmRefreshWidgets, kbF6, hcNoContext, "F6") +
             *new TSubMenu("~P~referencias", kbAltP) +
@@ -1315,11 +1262,7 @@ public:
                 *new TStatusItem("~F2~ Welcome", kbF2, cmWelcome) +
                 *new TStatusItem("~F4~ File Manager", kbF4, cmNavigator) +
                 *new TStatusItem("~F9~ Panel", kbF9, cmToggleFilePanel) +
-                *new TStatusItem("~Ctrl-N~ Novela", kbCtrlN, cmNewNovel) +
-                *new TStatusItem("~Ctrl-C~ Capitulo", kbCtrlC, cmNewChapter) +
                 *new TStatusItem("~F5~ Preferencias", kbF5, cmPreferences) +
-                *new TStatusItem("~F7/F8~ Novela", kbF7, cmPrevNovel) +
-                *new TStatusItem("~Alt-J/K~ Capitulo", kbAltJ, cmPrevChapter) +
                 *new TStatusItem("~Alt-X~ Salir", kbAltX, cmQuit) +
                 *new TStatusItem("~Ctrl-Q~ Salir", kbCtrlQ, cmQuit) +
                 *new TStatusItem(0, kbF10, cmMenu)
@@ -1369,14 +1312,6 @@ public:
             TColorDesired(TColorXTerm(uchar(textColor & 0xFF))),
             TColorDesired(TColorXTerm(uchar(backColor & 0xFF)))
         );
-    }
-
-    virtual void idle() override {
-        TApplication::idle();
-        if (pendingStartupWelcome) {
-            pendingStartupWelcome = false;
-            showWelcomeDialog();
-        }
     }
 
     virtual void shutDown() override {
@@ -1450,36 +1385,12 @@ public:
         if (event.what != evCommand) return;
 
         switch (event.message.command) {
-            case cmNewNovel:
-                onNewNovel();
-                clearEvent(event);
-                break;
-            case cmNewChapter:
-                onNewChapter();
-                clearEvent(event);
-                break;
             case cmWelcome:
                 showWelcomeDialog();
                 clearEvent(event);
                 break;
             case cmNavigator:
                 showNavigatorDialog();
-                clearEvent(event);
-                break;
-            case cmPrevNovel:
-                stepNovel(-1);
-                clearEvent(event);
-                break;
-            case cmNextNovel:
-                stepNovel(+1);
-                clearEvent(event);
-                break;
-            case cmPrevChapter:
-                stepChapter(-1);
-                clearEvent(event);
-                break;
-            case cmNextChapter:
-                stepChapter(+1);
                 clearEvent(event);
                 break;
             case cmRefreshWidgets:
@@ -1506,22 +1417,12 @@ public:
 
 private:
     std::string projectDir;
-    std::string novelsDir;
-    std::string novelsIndexPath;
     std::string preferencesPath;
     std::string workspacePath;
     /** Directorio mostrado en el File Manager (explorador). */
     std::string browserDir;
     /** Ultimo archivo abierto en el editor (sesion y reapertura). */
     std::string lastEditorPath;
-    std::string currentNovelDir;
-    std::string chaptersDir;
-    std::string chaptersIndexPath;
-
-    std::vector<EntryMeta> novels;
-    std::vector<EntryMeta> chapters;
-    int currentNovelIndex {-1};
-    int currentChapterIndex {-1};
     /** Color explicito de texto VGA (0..15). */
     ushort textColor {15};
     /** Color explicito de fondo VGA (0..7 recomendado). */
@@ -1540,8 +1441,6 @@ private:
     NavigatorListView *navListView {nullptr};
     bool filePanelVisible {true};
     UnicodeBackground *unicodeBackground {nullptr};
-    /** Primera pasada del bucle principal: mostrar bienvenida fuera del ctor. */
-    bool pendingStartupWelcome {true};
 
     void requestQuit() {
         // Forzamos fin del loop principal y de modales activos.
@@ -1603,12 +1502,12 @@ private:
         out << "patternUtf8 " << utf8ToHex(desktopPatternUtf8) << "\n";
     }
 
-    bool loadWorkspaceSession() {
+    /** Lee workspace.cfg (v1): cwd del panel, visibilidad del panel, ultimo archivo del editor. */
+    void loadWorkspaceSession() {
         std::ifstream in(workspacePath);
-        if (!in.is_open()) return false;
+        if (!in.is_open()) return;
         std::string ver;
-        if (!std::getline(in, ver) || trim(ver) != "v1") return false;
-        int novel = -1, chapter = -1;
+        if (!std::getline(in, ver) || trim(ver) != "v1") return;
         std::string cwdVal, editVal;
         std::string line;
         while (std::getline(in, line)) {
@@ -1619,25 +1518,12 @@ private:
             std::string key = trim(t.substr(0, sp));
             std::string val = t.substr(sp + 1);
             while (!val.empty() && val[0] == ' ') val.erase(0, 1);
-            try {
-                if (key == "novel") novel = std::stoi(trim(val));
-                else if (key == "chapter") chapter = std::stoi(trim(val));
-            } catch (...) {
-            }
-            if (key == "cwd") cwdVal = val;
-            else if (key == "edit") editVal = val;
-            else if (key == "panel") filePanelVisible = (trim(val) != "0");
-        }
-
-        bool novelOk = false;
-        if (novel >= 0 && novel < (int)novels.size()) {
-            switchNovel(novel);
-            if (chapters.empty()) createChapter("Capitulo 1");
-            if (chapter >= 0 && chapter < (int)chapters.size())
-                currentChapterIndex = chapter;
-            else
-                currentChapterIndex = chapters.empty() ? -1 : 0;
-            novelOk = true;
+            if (key == "cwd")
+                cwdVal = val;
+            else if (key == "edit")
+                editVal = val;
+            else if (key == "panel")
+                filePanelVisible = (trim(val) != "0");
         }
 
         std::error_code ec;
@@ -1647,18 +1533,12 @@ private:
         lastEditorPath.clear();
         if (!editVal.empty())
             lastEditorPath = editVal;
-
-        return novelOk;
     }
 
     void saveWorkspaceSession() {
         std::ofstream out(workspacePath, std::ios::trunc);
         if (!out.is_open()) return;
         out << "v1\n";
-        if (currentNovelIndex >= 0)
-            out << "novel " << currentNovelIndex << "\n";
-        if (currentChapterIndex >= 0)
-            out << "chapter " << currentChapterIndex << "\n";
         out << "cwd " << browserDir << "\n";
         out << "panel " << (filePanelVisible ? 1 : 0) << "\n";
         if (!lastEditorPath.empty())
@@ -1722,117 +1602,6 @@ private:
         return result;
     }
 
-    bool loadEntriesIndex(const std::string &indexPath, std::vector<EntryMeta> &dst) {
-        dst.clear();
-        std::ifstream in(indexPath);
-        if (!in.is_open()) return true;
-        std::string line;
-        while (std::getline(in, line)) {
-            auto sep = line.find('|');
-            if (sep == std::string::npos) continue;
-            EntryMeta e;
-            e.key = trim(line.substr(0, sep));
-            e.title = trim(line.substr(sep + 1));
-            if (!e.key.empty() && !e.title.empty()) dst.push_back(e);
-        }
-        return true;
-    }
-
-    bool saveEntriesIndex(const std::string &indexPath, const std::vector<EntryMeta> &src) {
-        std::ofstream out(indexPath, std::ios::trunc);
-        if (!out.is_open()) return false;
-        for (const auto &e : src) out << e.key << "|" << e.title << "\n";
-        return true;
-    }
-
-    bool loadNovelsIndex() { return loadEntriesIndex(novelsIndexPath, novels); }
-    bool saveNovelsIndex() { return saveEntriesIndex(novelsIndexPath, novels); }
-    bool loadChaptersIndex() { return loadEntriesIndex(chaptersIndexPath, chapters); }
-    bool saveChaptersIndex() { return saveEntriesIndex(chaptersIndexPath, chapters); }
-
-    void switchNovel(int idx) {
-        if (idx < 0 || idx >= (int)novels.size()) return;
-        currentNovelIndex = idx;
-        currentNovelDir = joinPath(novelsDir, novels[idx].key);
-        chaptersDir = joinPath(currentNovelDir, "chapters");
-        chaptersIndexPath = joinPath(currentNovelDir, "chapters.idx");
-        ensureDir(novelsDir);
-        ensureDir(currentNovelDir);
-        ensureDir(chaptersDir);
-        loadChaptersIndex();
-        if (!chapters.empty()) currentChapterIndex = 0;
-        browserDir = absolutePath(chaptersDir);
-    }
-
-    bool createNovel(const std::string &titleRaw) {
-        std::string title = trim(titleRaw);
-        if (title.empty()) title = "Novela sin titulo";
-        if ((int)novels.size() >= 999) return false;
-
-        std::string slug = slugify(title);
-        int seq = (int)novels.size() + 1;
-        std::string folder;
-        while (true) {
-            std::ostringstream ss;
-            ss << "nv";
-            ss.width(3);
-            ss.fill('0');
-            ss << seq << "_" << slug;
-            folder = ss.str();
-            bool exists = false;
-            for (const auto &n : novels) {
-                if (n.key == folder) {
-                    exists = true;
-                    break;
-                }
-            }
-            if (!exists) break;
-            seq++;
-        }
-
-        novels.push_back({folder, title});
-        saveNovelsIndex();
-        switchNovel((int)novels.size() - 1);
-        return true;
-    }
-
-    bool createChapter(const std::string &titleRaw) {
-        if (currentNovelIndex < 0) return false;
-        std::string title = trim(titleRaw);
-        if (title.empty()) title = "Capitulo sin titulo";
-        if ((int)chapters.size() >= 999) return false;
-
-        std::string slug = slugify(title);
-        int seq = (int)chapters.size() + 1;
-        std::string filename;
-        while (true) {
-            std::ostringstream ss;
-            ss << "ch";
-            ss.width(3);
-            ss.fill('0');
-            ss << seq << "_" << slug << ".txt";
-            filename = ss.str();
-            bool exists = false;
-            for (const auto &c : chapters) {
-                if (c.key == filename) {
-                    exists = true;
-                    break;
-                }
-            }
-            if (!exists) break;
-            seq++;
-        }
-
-        std::string full = joinPath(chaptersDir, filename);
-        std::ofstream f(full, std::ios::app);
-        f.close();
-
-        chapters.push_back({filename, title});
-        saveChaptersIndex();
-        currentChapterIndex = (int)chapters.size() - 1;
-        return true;
-    }
-
     bool promptTitle(const char *dlgTitle, const char *lbl, std::string &outTitle) {
         struct Data { char title[MAX_TITLE]; } data = {{0}};
         TDialog *d = new TDialog(TRect(18, 6, 72, 16), dlgTitle);
@@ -1891,10 +1660,13 @@ private:
 
     void openFileInEditor(const std::string &path) {
         if (!deskTop) return;
-        const std::string absPath = absolutePath(path);
+        std::string absPath;
+        if (!path.empty())
+            absPath = absolutePath(path);
         closeCurrentEditor();
         TRect r = editorDeskRect();
-        TEditWindow *w = new TEditWindow(r, absPath.c_str(), wnNoNumber);
+        const char *titleArg = absPath.empty() ? "" : absPath.c_str();
+        TEditWindow *w = new TEditWindow(r, titleArg, wnNoNumber);
         // Sin ofTopSelect: select() hace setCurrent(escritorio) y no makeFirst(). Con el flag
         // por defecto, makeFirst() -> putInFrontOf -> resetCurrent() y firstMatch() a menudo
         // fija el panel como ventana actual: el editor pierde sfSelected y el raton no enfoca.
@@ -1908,14 +1680,8 @@ private:
         // archivo siempre queremos teclear en el editor.
         if (deskTop && editorWindow)
             deskTop->setCurrent(editorWindow, normalSelect);
-        lastEditorPath = absPath;
+        lastEditorPath = std::move(absPath);
         saveWorkspaceSession();
-    }
-
-    void openCurrentChapter() {
-        if (currentNovelIndex < 0 || currentChapterIndex < 0 || currentChapterIndex >= (int)chapters.size()) return;
-        std::string path = joinPath(chaptersDir, chapters[currentChapterIndex].key);
-        openFileInEditor(path);
     }
 
     void reopenEditorFromSession() {
@@ -1926,7 +1692,7 @@ private:
                 return;
             }
         }
-        openCurrentChapter();
+        openFileInEditor("");
     }
 
     std::vector<NavigatorListView::NavItem> buildFileManagerItems() const {
@@ -2041,44 +1807,6 @@ private:
         saveWorkspaceSession();
     }
 
-    void stepNovel(int delta) {
-        if (novels.empty()) return;
-        int n = (int)novels.size();
-        if (currentNovelIndex < 0) currentNovelIndex = 0;
-        currentNovelIndex = (currentNovelIndex + delta + n) % n;
-        switchNovel(currentNovelIndex);
-        if (chapters.empty()) createChapter("Capitulo 1");
-        currentChapterIndex = std::max(0, currentChapterIndex);
-        openCurrentChapter();
-        refreshNavigatorWidget();
-    }
-
-    void stepChapter(int delta) {
-        if (chapters.empty()) return;
-        int n = (int)chapters.size();
-        if (currentChapterIndex < 0) currentChapterIndex = 0;
-        currentChapterIndex = (currentChapterIndex + delta + n) % n;
-        openCurrentChapter();
-        refreshNavigatorWidget();
-    }
-
-    void onNewNovel() {
-        std::string title;
-        if (!promptTitle("Nueva novela", "Nombre de la novela", title)) return;
-        createNovel(title);
-        if (chapters.empty()) createChapter("Capitulo 1");
-        openCurrentChapter();
-        refreshNavigatorWidget();
-    }
-
-    void onNewChapter() {
-        std::string title;
-        if (!promptTitle("Nuevo capitulo", "Nombre del capitulo", title)) return;
-        createChapter(title);
-        openCurrentChapter();
-        refreshNavigatorWidget();
-    }
-
     void showWelcomeDialog() {
         const int dlgL = 6, dlgT = 2, dlgR = 78, dlgB = 26;
         const int dlgW = dlgR - dlgL;
@@ -2099,16 +1827,12 @@ private:
         d->options |= ofCentered;
         d->insert(new RainbowBannerView(TRect((short)bx, (short)by, (short)br, (short)bb), welcomeBannerLines(), &backColor,
                                         &textColor));
-        // "Nueva novela" (12 chars) en 14 celdas queda al ras del borde; algo mas
-        // de ancho evita que se vea cortada con negrita o el glifo \xDC.
-        const int bwNovela = 18;
         const int bw = 14;
-        const int gap = 3;
-        const int btnBarW = bwNovela + 2 * bw + 2 * gap;
+        const int gap = 4;
+        const int btnBarW = 2 * bw + gap;
         const int bx0 = inset + (innerW - btnBarW) / 2;
-        d->insert(new CleanButton(TRect(bx0, buttonRow, bx0 + bwNovela, buttonRow + 2), "Nueva novela", cmNewNovel, false));
-        d->insert(new CleanButton(TRect(bx0 + bwNovela + gap, buttonRow, bx0 + bwNovela + gap + bw, buttonRow + 2), "Entrar", cmOK, true));
-        d->insert(new CleanButton(TRect(bx0 + bwNovela + gap + bw + gap, buttonRow, bx0 + bwNovela + gap + bw + gap + bw, buttonRow + 2), "Salir", cmCancel, false));
+        d->insert(new CleanButton(TRect(bx0, buttonRow, bx0 + bw, buttonRow + 2), "Entrar", cmOK, true));
+        d->insert(new CleanButton(TRect(bx0 + bw + gap, buttonRow, bx0 + 2 * bw + gap, buttonRow + 2), "Salir", cmCancel, false));
         TColorAttr prevShadowAttr = shadowAttr;
         shadowAttr = TColorAttr(0x00);
         ushort res = deskTop->execView(d);
@@ -2116,9 +1840,6 @@ private:
         destroy(d);
         if (res == cmCancel) {
             endModal(cmQuit);
-        } else if (res == cmNewNovel) {
-            onNewNovel();
-            restoreMainWorkspaceAfterModal();
         } else {
             restoreMainWorkspaceAfterModal();
         }

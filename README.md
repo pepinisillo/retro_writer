@@ -1,6 +1,6 @@
 # retro_writer
 
-Editor de novelas en terminal con interfaz **Turbo Vision** (código en `retro_writer_tv.cpp`, librería en `vendor/tvision`).
+Editor de texto en terminal con interfaz **Turbo Vision**: panel de archivos, editor y preferencias (código en `retro_writer_tv.cpp`, librería en `vendor/tvision`).
 
 **Repositorio:** [https://github.com/pepinisillo/retro_writer](https://github.com/pepinisillo/retro_writer)
 
@@ -30,8 +30,8 @@ El ejecutable es `build/retro_writer_tv`.
 ./build/retro_writer_tv /ruta/a/tu_proyecto
 ```
 
-Sin argumentos usa el **directorio actual** (`.`). La carpeta de proyecto **debe existir ya**; el programa no crea la raíz del proyecto por ti. La subcarpeta `novelas/` se crea cuando hace falta (al crear o abrir novelas).
+Sin argumentos usa el **directorio actual** (`.`). Esa carpeta (directorio de **configuración**) **debe existir ya**; ahí se guardan `workspace.cfg` (última ruta del panel, archivo abierto, panel visible) y `appearance.cfg`. Abre archivos desde el panel (F4) o arranca con un buffer sin título hasta que guardes.
 
-Los menús y la barra de estado muestran atajos (novelas, capítulos, panel de archivos, preferencias, salida, etc.).
+Los menús y la barra de estado muestran atajos (panel de archivos, preferencias, salida, etc.).
 
 
