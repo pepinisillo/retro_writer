@@ -475,6 +475,14 @@ void Win32Display::flush() noexcept
     }
 }
 
+void Win32Display::forgetCaretPosition() noexcept
+{
+    if (ansiScreenWriter)
+        ansiScreenWriter->forgetCaretPosition();
+    else
+        caretPos = {-1, -1};
+}
+
 #endif // _WIN32
 
 /////////////////////////////////////////////////////////////////////////

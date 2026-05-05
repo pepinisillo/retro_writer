@@ -49,6 +49,7 @@ DWORD THardwareInfo::getButtonCount() noexcept { return 2; }
 void THardwareInfo::cursorOn() noexcept {}
 void THardwareInfo::cursorOff() noexcept {}
 void THardwareInfo::flushScreen() noexcept { platf->flushScreen(); }
+void THardwareInfo::forgetCaretPosition() noexcept { platf->forgetCaretPosition(); }
 void THardwareInfo::setUpConsole() noexcept { platf->setUpConsole(); }
 void THardwareInfo::restoreConsole() noexcept { platf->restoreConsole(); }
 

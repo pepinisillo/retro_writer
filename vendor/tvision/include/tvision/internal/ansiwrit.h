@@ -140,6 +140,10 @@ public:
 
     void reset() noexcept;
     void clearScreen() noexcept;
+    /** Tras salida cruda (p. ej. Sixel) al terminal, el cursor real y el
+     *  rastreado aqui pueden desincronizarse; esto obliga al siguente writeCell
+     *  a emitir CUP completo. */
+    void forgetCaretPosition() noexcept { caretPos = {-1, -1}; }
 
     void writeCell(TPoint, TStringView, TColorAttr, bool) noexcept;
     void setCaretPosition(TPoint) noexcept;

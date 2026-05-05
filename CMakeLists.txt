@@ -10,5 +10,15 @@ set(TV_OPTIMIZE_BUILD ON CACHE BOOL "" FORCE)
 
 add_subdirectory(vendor/tvision)
 
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(LIBSIXEL IMPORTED_TARGET libsixel)
+endif()
+
 add_executable(retro_writer_tv retro_writer_tv.cpp)
+target_include_directories(retro_writer_tv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/stb)
 target_link_libraries(retro_writer_tv PRIVATE tvision::tvision)
+if(TARGET PkgConfig::LIBSIXEL)
+    target_compile_definitions(retro_writer_tv PRIVATE HAVE_LIBSIXEL)
+    target_link_libraries(retro_writer_tv PRIVATE PkgConfig::LIBSIXEL)
+endif()

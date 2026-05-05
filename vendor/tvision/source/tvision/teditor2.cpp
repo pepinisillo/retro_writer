@@ -36,10 +36,259 @@
 #include <dos.h>
 #endif  // __DOS_H
 
+#include <utility>
+#include <vector>
+
 extern "C" {
 int countLines( const char *buf, uint count );
 uint scan( const char *block, uint size, const char *str );
 uint iScan( const char *block, uint size, const char *str );
+}
+static const bool kEditorSoftWrap = true;
+
+static int visualWrapWidth2(const TEditor &ed)
+{
+    return max(1, (int)ed.size.x);
+}
+
+static inline bool edWrapSpaceChar2(TEditor &ed, uint p)
+{
+    if (p >= ed.bufLen)
+        return false;
+    char c = ed.bufChar(p);
+    return c == ' ' || c == '\t';
+}
+
+struct EdWrapHole2
+{
+    uint a;
+    uint b;
+    int snapVx;
+    int snapSubRow;
+};
+
+static void edBuildWrapSegments2(TEditor &ed, uint ls, uint le, int w,
+                                   std::vector<std::pair<uint, uint>> &segs,
+                                   std::vector<EdWrapHole2> &holes)
+{
+    segs.clear();
+    holes.clear();
+    if (le <= ls)
+    {
+        segs.emplace_back(ls, ls);
+        return;
+    }
+
+    uint segStart = ls;
+    int col = 0;
+    uint p = ls;
+
+    while (p < le)
+    {
+        uint ps = p;
+        while (ps < le && edWrapSpaceChar2(ed, ps))
+            ps++;
+        uint pw = ps;
+        while (pw < le && !edWrapSpaceChar2(ed, pw))
+            pw++;
+
+        const int spaceW = (int) ed.charPos(p, ps);
+        const int wordW = (int) ed.charPos(ps, pw);
+
+        if (spaceW > 0)
+        {
+            if (col + spaceW <= w)
+            {
+                col += spaceW;
+                p = ps;
+            }
+            else if (col > 0)
+            {
+                if (segStart < p)
+                    segs.emplace_back(segStart, p);
+                const int snapSubRow = (int) segs.size() - 1;
+                holes.push_back(EdWrapHole2{p, ps, min(col, w - 1), snapSubRow});
+                segStart = ps;
+                col = 0;
+                p = ps;
+                continue;
+            }
+            else
+            {
+                uint q = p;
+                while (q < ps)
+                {
+                    uint nq = ed.nextChar(q);
+                    const int cw = (int) ed.charPos(q, nq);
+                    if (col + cw > w)
+                    {
+                        if (col > 0)
+                        {
+                            if (segStart < q)
+                                segs.emplace_back(segStart, q);
+                            segStart = q;
+                            col = 0;
+                        }
+                        else if (cw > w)
+                        {
+                            segs.emplace_back(q, nq);
+                            segStart = nq;
+                            col = 0;
+                            q = nq;
+                            continue;
+                        }
+                    }
+                    col += cw;
+                    q = nq;
+                }
+                p = ps;
+                continue;
+            }
+        }
+
+        if (pw == ps)
+        {
+            p = pw;
+            continue;
+        }
+
+        if (col + wordW <= w)
+        {
+            col += wordW;
+            p = pw;
+            continue;
+        }
+
+        if (col > 0)
+        {
+            if (segStart < ps)
+                segs.emplace_back(segStart, ps);
+            segStart = ps;
+            col = 0;
+            p = ps;
+            continue;
+        }
+
+        uint q = ps;
+        while (q < pw)
+        {
+            uint nq = ed.nextChar(q);
+            const int cw = (int) ed.charPos(q, nq);
+            if (col + cw > w)
+            {
+                if (col > 0)
+                {
+                    if (segStart < q)
+                        segs.emplace_back(segStart, q);
+                    segStart = q;
+                    col = 0;
+                    continue;
+                }
+                if (cw > w)
+                {
+                    segs.emplace_back(q, nq);
+                    segStart = nq;
+                    col = 0;
+                    q = nq;
+                    continue;
+                }
+            }
+            col += cw;
+            q = nq;
+        }
+        p = pw;
+    }
+
+    if (segStart < le)
+        segs.emplace_back(segStart, le);
+    if (segs.empty())
+        segs.emplace_back(ls, ls);
+}
+
+static int visualRowsForLine2(TEditor &ed, uint lineStartPtr)
+{
+    int w = visualWrapWidth2(ed);
+    uint le = ed.lineEnd(lineStartPtr);
+    std::vector<std::pair<uint, uint>> segs;
+    std::vector<EdWrapHole2> holes;
+    edBuildWrapSegments2(ed, lineStartPtr, le, w, segs, holes);
+    return max(1, (int) segs.size());
+}
+
+static int visualTotalRows2(TEditor &ed)
+{
+    int total = 0;
+    for (uint p = 0; p < ed.bufLen; p = ed.nextLine(p))
+        total += visualRowsForLine2(ed, p);
+    return max(total, 1);
+}
+
+static void edWrapPtrToVisual2(TEditor &ed, uint ls, uint le, int w, uint ptr,
+                               int &vx, int &subRow)
+{
+    std::vector<std::pair<uint, uint>> segs;
+    std::vector<EdWrapHole2> holes;
+    edBuildWrapSegments2(ed, ls, le, w, segs, holes);
+
+    if (ptr >= le && !segs.empty())
+    {
+        const int last = (int) segs.size() - 1;
+        vx = min(ed.charPos(segs[last].first, le), w - 1);
+        subRow = last;
+        return;
+    }
+
+    for (const EdWrapHole2 &h : holes)
+    {
+        if (h.a <= ptr && ptr < h.b)
+        {
+            vx = min(max(0, h.snapVx), w - 1);
+            subRow = max(0, h.snapSubRow);
+            return;
+        }
+    }
+
+    for (int i = 0; i < (int) segs.size(); ++i)
+    {
+        uint a = segs[i].first;
+        uint b = segs[i].second;
+        if (a <= ptr && ptr < b)
+        {
+            vx = min(ed.charPos(a, ptr), w - 1);
+            subRow = i;
+            return;
+        }
+        if (ptr == b && i + 1 < (int) segs.size() && ptr == segs[i + 1].first)
+        {
+            vx = 0;
+            subRow = i + 1;
+            return;
+        }
+    }
+
+    if (!segs.empty())
+    {
+        const int last = (int) segs.size() - 1;
+        uint a = segs[last].first;
+        vx = min(ed.charPos(a, min(ptr, le)), w - 1);
+        subRow = last;
+        return;
+    }
+    vx = 0;
+    subRow = 0;
+}
+
+static void visualCursorPos2(TEditor &ed, int &vx, int &vy)
+{
+    int w = visualWrapWidth2(ed);
+    uint ls = ed.lineStart(ed.curPtr);
+    uint le = ed.lineEnd(ls);
+    int subRow = 0;
+    edWrapPtrToVisual2(ed, ls, le, w, ed.curPtr, vx, subRow);
+    vy = 0;
+    for (uint p = 0; p < ls; p = ed.nextLine(p))
+        vy += visualRowsForLine2(ed, p);
+    vy += subRow;
 }
 
 static int getCharType( char ch )
@@ -376,8 +625,17 @@ void TEditor::replace()
 
 void TEditor::scrollTo( int x, int y )
 {
-    x = max(0, min(x, limit.x - size.x));
-    y = max(0, min(y, limit.y - size.y));
+    if( kEditorSoftWrap )
+        {
+        x = 0;
+        int maxY = max(0, visualTotalRows2(*this) - size.y);
+        y = max(0, min(y, maxY));
+        }
+    else
+        {
+        x = max(0, min(x, limit.x - size.x));
+        y = max(0, min(y, limit.y - size.y));
+        }
     if( x != delta.x || y != delta.y )
         {
         delta.x = x;
@@ -583,7 +841,16 @@ void TEditor::toggleInsMode()
 
 void TEditor::trackCursor( Boolean center )
 {
-    if( center == True )
+    if( kEditorSoftWrap )
+        {
+        int vx, vy;
+        visualCursorPos2(*this, vx, vy);
+        if( center == True )
+            scrollTo(0, vy - size.y / 2);
+        else
+            scrollTo(0, max(vy - size.y + 1, min(delta.y, vy)));
+        }
+    else if( center == True )
         scrollTo( curPos.x - size.x + 1, curPos.y - size.y / 2);
     else
         scrollTo( max(curPos.x - size.x + 1, min(delta.x, curPos.x)),

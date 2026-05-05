@@ -101,6 +101,11 @@ void NcursesDisplay::flush() noexcept
     ansiScreenWriter.flush();
 }
 
+void NcursesDisplay::forgetCaretPosition() noexcept
+{
+    ansiScreenWriter.forgetCaretPosition();
+}
+
 } // namespace tvision
 
 #endif // HAVE_NCURSES

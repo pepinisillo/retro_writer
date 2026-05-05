@@ -1,4 +1,8 @@
+# Artefactos de compilación (CMake)
 /build/
-/retro_writer
-/workspace.cfg
+
+# Configuración local: no se versionan para que un `git clone` deje el repo limpio
+# y la app cree o regenere estos archivos al ejecutarse (ver README).
 /appearance.cfg
+/workspace.cfg
+/visuals.cfg

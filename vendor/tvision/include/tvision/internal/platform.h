@@ -31,6 +31,7 @@ public:
     virtual void setCaretSize(int /*size*/) noexcept {};
     virtual void clearScreen() noexcept {}
     virtual void flush() noexcept {};
+    virtual void forgetCaretPosition() noexcept {}
 };
 
 class InputAdapter : public EventSource
@@ -130,6 +131,8 @@ public:
     void screenWrite(int x, int y, TScreenCell *b, int l) noexcept { displayBuf.screenWrite(x, y, b, l); }
     void flushScreen() noexcept
         { console.lock([&] (auto *c) { displayBuf.flushScreen(c->display); }); }
+    void forgetCaretPosition() noexcept
+        { console.lock([&] (auto *c) { c->display.forgetCaretPosition(); }); }
     TScreenCell *reloadScreenInfo() noexcept
         { return console.lock([&] (auto *c) { return displayBuf.reloadScreenInfo(c->display); }); }
     void freeScreenBuffer() noexcept { displayBuf.reset(); }

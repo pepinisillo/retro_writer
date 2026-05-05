@@ -26,6 +26,7 @@ void ConsoleCtl::destroyInstance() noexcept
 
 #ifdef _TV_UNIX
 
+#include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -72,10 +73,17 @@ void ConsoleCtl::write(const char *data, size_t bytes) const noexcept
 {
     fflush(fout());
     size_t written = 0;
-    int r;
-    while ( written < bytes &&
-            0 <= (r = ::write(out(), data + written, bytes - written)) )
-        written += r;
+    while (written < bytes) {
+        ssize_t r = ::write(out(), data + written, bytes - written);
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (r == 0)
+            break;
+        written += (size_t) r;
+    }
 }
 
 TPoint ConsoleCtl::getSize() const noexcept

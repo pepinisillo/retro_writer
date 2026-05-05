@@ -78,6 +78,8 @@ public:
     static void setScreenMode( ushort mode ) noexcept;
     static void clearScreen( ushort w, ushort h ) noexcept;
     static void flushScreen() noexcept;
+    /** Invalida el rastreo del cursor en la salida ANSI (p. ej. tras graficos Sixel). */
+    static void forgetCaretPosition() noexcept;
     static void screenWrite( ushort x, ushort y, TScreenCell *buf, DWORD len ) noexcept;
     static TScreenCell *allocateScreenBuffer() noexcept;
     static void freeScreenBuffer( TScreenCell *buffer ) noexcept;
@@ -204,6 +206,10 @@ inline void THardwareInfo::clearScreen( ushort w, ushort h ) noexcept
 #pragma option -w+inl
 
 inline void THardwareInfo::flushScreen() noexcept
+{
+}
+
+inline void THardwareInfo::forgetCaretPosition() noexcept
 {
 }
 

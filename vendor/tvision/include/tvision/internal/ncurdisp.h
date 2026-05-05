@@ -42,6 +42,7 @@ private:
     void setCaretSize(int) noexcept override;
     void clearScreen() noexcept override;
     void flush() noexcept override;
+    void forgetCaretPosition() noexcept override;
 };
 
 } // namespace tvision
