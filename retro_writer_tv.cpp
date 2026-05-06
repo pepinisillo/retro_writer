@@ -6900,10 +6900,6 @@ private:
         outAsciiText.clear();
         outFontFile.clear();
         const auto fonts = asciiFontItems();
-        if (fonts.empty()) {
-            messageBox(mfError | mfOKButton, "No hay fuentes en ascii_fonts/. Agrega .flf/.tlf/.txt.");
-            return false;
-        }
         TxtTemplateDialog *d = new TxtTemplateDialog(
             TRect(14, 5, 94, 12), fonts, [this](const std::string &t, const std::string &f) { return renderAsciiWithFontFile(t, f); });
         d->fileLine = new TInputLine(TRect(3, 3, 34, 4), MAX_TITLE - 2);
@@ -6912,7 +6908,11 @@ private:
         d->asciiLine = new TInputLine(TRect(36, 3, 76, 4), MAX_TITLE - 2);
         d->insert(d->asciiLine);
         d->insert(new TLabel(TRect(36, 2, 76, 3), "Texto ASCII (opcional)", d->asciiLine));
-        d->insert(new TButton(TRect(24, 6, 36, 8), "preview", cmAsciiOpenPreview, bfNormal));
+        if (fonts.empty()) {
+            d->insert(new TLabel(TRect(3, 5, 76, 6), "No hay fuentes en ascii_fonts/. El .txt se creara normal.", d->asciiLine));
+        } else {
+            d->insert(new TButton(TRect(24, 6, 36, 8), "preview", cmAsciiOpenPreview, bfNormal));
+        }
         d->insert(new TButton(TRect(38, 6, 50, 8), "Aceptar", cmOK, bfDefault));
         d->insert(new TButton(TRect(52, 6, 64, 8), "Cancelar", cmCancel, bfNormal));
         d->themeTextRef = &textColor;
@@ -6956,7 +6956,7 @@ private:
             return;
         }
         if (!asciiSeed.empty()) {
-            const std::string asciiTitle = renderAsciiWithFontFile(asciiSeed, asciiFontFile);
+            const std::string asciiTitle = asciiFontFile.empty() ? asciiSeed : renderAsciiWithFontFile(asciiSeed, asciiFontFile);
             f << asciiTitle << "\n\n";
         }
         f.close();
