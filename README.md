@@ -348,3 +348,46 @@ cmake --build build -j$(nproc)
 - **Historia aparte** (ej. carpeta `meep/`): si **se versiona** en otro repo o **se copia** aparte, ahí **sí** **pueden** existir `visuals.cfg` y `assets/`; ese `.gitignore` **solo afecta** al árbol del clon del IDE, no a carpetas externas no añadidas al repo.
 
 Si **se desea** publicar una novela completa **dentro** del mismo repo, **debe** quitarse del `.gitignore` lo que **deba** subirse (o **usarse** `git add -f`) y **documentarse** en el README; en el flujo por defecto **no** **se suben** las tres configuraciones de la raíz del IDE.
+
+---
+
+## 17) Crear con IA (uso rápido)
+
+- Menú: **Crear con IA → Crear con IA...**
+- Flujo mínimo:
+  1. Escribir **Nombre carpeta**.
+  2. Pulsar **Solicitar** (obligatorio).
+  3. Revisar **Idea** y **Días sugeridos**.
+  4. Pulsar **Crear**.
+
+Notas:
+- El tipo de prompt IA **se elige random automáticamente** en cada solicitud.
+- Si no se pulsa **Solicitar**, el botón **Crear** muestra error y no crea proyecto.
+- Configuración de endpoints/modelo: **Crear con IA → Configurar IA...**
+  - Ahí se define a qué IA se conecta la app (endpoints de idea/feedback, modelo, API key y timeout).
+  - Si **Solicitar** falla o responde mal, lo primero es revisar esta pantalla.
+
+---
+
+## 18) Botón [ txt ] y fuentes ASCII
+
+- Al pulsar **[ txt ]** se abre un diálogo para:
+  - nombre de archivo `.txt`,
+  - texto opcional para título ASCII,
+  - lista scrolleable de fuentes (4 visibles),
+  - botón **Ver vista previa** (abre ventana aparte),
+  - botones **Aceptar** y **Cancelar**.
+
+- Si el texto ASCII queda vacío, el archivo se crea normal.
+- Si hay texto ASCII, se renderiza con la fuente seleccionada y se escribe al inicio del archivo.
+
+### Carpeta de fuentes
+
+- Las fuentes se cargan desde: **`ascii_fonts/`**
+- Formatos reconocidos: **`.flf`** y **`.tlf`**
+- Si no hay fuentes válidas, el diálogo muestra error.
+
+### Archivos auxiliares
+
+- Renderer: **`tools/render_ascii.py`**
+- Motor local: **`tools/pyfiglet/`**

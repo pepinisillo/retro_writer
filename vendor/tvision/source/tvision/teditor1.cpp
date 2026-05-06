@@ -48,7 +48,7 @@ const ushort firstKeys[] =
 {
     41,
     kbCtrlA, cmSelectAll,
-    kbCtrlC, cmPageDown,
+    kbCtrlC, cmCopy,
     kbCtrlD, cmCharRight,
     kbCtrlE, cmLineUp,
     kbCtrlF, cmWordRight,
@@ -64,9 +64,10 @@ const ushort firstKeys[] =
     kbCtrlS, cmCharLeft,
     kbCtrlT, cmDelWord,
     kbCtrlU, cmUndo,
-    kbCtrlV, cmInsMode,
-    kbCtrlX, cmLineDown,
+    kbCtrlV, cmPaste,
+    kbCtrlX, cmCut,
     kbCtrlY, cmDelLine,
+    kbCtrlZ, cmUndo,
     kbLeft, cmCharLeft,
     kbRight, cmCharRight,
     kbAltBack, cmDelWordLeft,
@@ -475,7 +476,7 @@ static void formatLineRange(TDrawBuffer &b, TEditor &ed, uint linePtr, uint endP
 
         if (nextPos > hScroll)
         {
-            TColorAttr color = (ed.selStart <= P && P < ed.selEnd) ? colors >> 8 : colors;
+            TColorAttr color = (ed.selStart <= P && P < ed.selEnd) ? TColorAttr(0x70) : TColorAttr(colors);
             int charWidth = nextPos - max(pos, hScroll);
             if (buf[0] == '\t' || pos < hScroll)
                 b.moveChar(x, ' ', color, charWidth);
@@ -491,7 +492,7 @@ static void formatLineRange(TDrawBuffer &b, TEditor &ed, uint linePtr, uint endP
 
     if (x < width)
     {
-        TColorAttr colorAfter = (ed.selStart <= P && P < ed.selEnd) ? colors >> 8 : colors;
+        TColorAttr colorAfter = (ed.selStart <= P && P < ed.selEnd) ? TColorAttr(0x70) : TColorAttr(colors);
         b.moveChar(x, ' ', colorAfter, width - x);
     }
 }
@@ -665,6 +666,9 @@ void TEditor::clipPaste()
 {
     if( clipboard != this )
         {
+        /* Cada pegado debe quedar como unidad independiente de undo. */
+        delCount = 0;
+        insCount = 0;
         if( clipboard != 0 )
             insertFrom(clipboard);
         else

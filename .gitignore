@@ -6,3 +6,8 @@
 /appearance.cfg
 /workspace.cfg
 /visuals.cfg
+/ia_writer.cfg
+/ia_escrituras.jsonl
+/ia_solicitudes.jsonl
+/ascii_fonts/*
+!/ascii_fonts/.gitkeep

@@ -15,7 +15,7 @@ if(PkgConfig_FOUND)
     pkg_check_modules(LIBSIXEL IMPORTED_TARGET libsixel)
 endif()
 
-add_executable(retro_writer_tv retro_writer_tv.cpp)
+add_executable(retro_writer_tv retro_writer_tv.cpp ia_writer.cpp)
 target_include_directories(retro_writer_tv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/stb)
 target_link_libraries(retro_writer_tv PRIVATE tvision::tvision)
 if(TARGET PkgConfig::LIBSIXEL)

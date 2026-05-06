@@ -417,6 +417,9 @@ Boolean TEditor::insertBuffer( const char *p,
     uint delLen = 0;
     if( allowUndo == True )
         {
+        /* Undo granular: cada edicion (tecla/pegar/cortar/borrar) inicia su propia unidad. */
+        delCount = 0;
+        insCount = 0;
         if( curPtr == selStart )
             delLen = selLen;
         else

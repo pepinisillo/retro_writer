@@ -15,6 +15,7 @@
 #define Uses_TFrame
 #define Uses_TInputLine
 #define Uses_TKeys
+#define Uses_TCheckBoxes
 #define Uses_TLabel
 #define Uses_TMenuBar
 #define Uses_TMenuItem
@@ -44,19 +45,22 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <filesystem>
 #include <cstdint>
 #include <iomanip>
 #include <memory>
+#include <random>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <climits>
 #include <cmath>
-#include <cstdlib>
+#include <iterator>
 #include <map>
 #include <functional>
 #include <tuple>
@@ -77,6 +81,7 @@ extern "C" {
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#include "ia_writer.hpp"
 
 namespace fs = std::filesystem;
 
@@ -95,7 +100,6 @@ namespace {
  * 7) main(): bootstrap de proyecto y arranque de la aplicacion.
  */
 
-const int cmWelcome = 1003;
 const int cmRefreshWidgets = 1009;
 const int cmPreferences = 1010;
 const int cmFgMatrixChanged = 1011;
@@ -105,6 +109,8 @@ const int cmNavSelect = 1014;
 const int cmToggleFilePanel = 1016;
 const int cmCreateFolder = 1015;
 const int cmCreateTxtFile = 1017;
+const int cmAsciiFontCursorChanged = 1038;
+const int cmAsciiOpenPreview = 1039;
 /** Base de comandos para popupMenu de ids de personaje (rwPickCharacterIdFromList). */
 const int cmPickCharPopupBase = 12000;
 const int cmReadabilityHelp = 1022;
@@ -150,6 +156,15 @@ const int cmLayoutSaveSlot = 1063;
 const int cmLayoutRestoreSlot = 1064;
 const int cmVisualSceneOpenLibrary = 1065;
 const int cmImageNavCursorChanged = 1066;
+/** Panel archivo: al cambiar ancho/alto del listado, recalcular titulo truncado y franja. */
+const int cmNavPanelLayoutChanged = 1067;
+const int cmIaSolicitar = 1068;
+const int cmCrearConIA = 1069;
+const int cmEntregarIA = 1070;
+const int cmIaPedirComentario = 1071;
+const int cmIaElegirUbicacion = 1072;
+const int cmIaConfig = 1073;
+const int cmIaResumen = 1074;
 
 static constexpr int kMaxPreviewImagePath = 480;
 
@@ -770,19 +785,19 @@ static size_t pathUtf8Next(const char *p, size_t rem) noexcept {
     return 1;
 }
 
-/** Título truncado por el final de la ruta; el ancho se mide en celdas (strwidth), no en bytes. */
+/** Titulo con prefijo "..." y sufijo de ruta (final visible); ancho en celdas (strwidth). */
 static std::string pathTitleForWidth(const std::string &path, int maxCols) {
     if (maxCols < 1)
         maxCols = 1;
     if (strwidth(TStringView(path.c_str(), path.size())) <= maxCols)
         return path;
 
-    static const char ell[] = ".../";
+    static const char ell[] = "...";
     const int ellw = strwidth(TStringView(ell));
     int budget = maxCols - ellw;
 
     if (budget < 1) {
-        /* Sin hueco para ".../": solo se recorta el sufijo. */
+        /* Sin hueco para "...": solo se recorta el sufijo. */
         for (size_t i = 0; i < path.size();) {
             TStringView suf(path.c_str() + i, path.size() - i);
             if (strwidth(suf) <= maxCols)
@@ -798,6 +813,43 @@ static std::string pathTitleForWidth(const std::string &path, int maxCols) {
         if (strwidth(suf) <= budget)
             return std::string(ell) + std::string(suf);
         size_t step = pathUtf8Next(path.c_str() + i, path.size() - i);
+        if (step == 0)
+            step = 1;
+        i += step;
+    }
+    return std::string(ell);
+}
+
+/**
+ * Texto de una fila del listado: si no cabe, se recorta por la izquierda y se antepone "..."
+ * para que en columnas estrechas se lea mejor el final (nombre de archivo/carpeta).
+ */
+static std::string labelTailForWidth(const std::string &s, int maxCols) {
+    if (maxCols < 1)
+        maxCols = 1;
+    if (strwidth(TStringView(s.c_str(), s.size())) <= maxCols)
+        return s;
+
+    static const char ell[] = "...";
+    const int ellw = strwidth(TStringView(ell));
+    int budget = maxCols - ellw;
+
+    if (budget < 1) {
+        for (size_t i = 0; i < s.size();) {
+            TStringView suf(s.c_str() + i, s.size() - i);
+            if (strwidth(suf) <= maxCols)
+                return std::string(suf);
+            size_t step = pathUtf8Next(s.c_str() + i, s.size() - i);
+            i += step ? step : 1;
+        }
+        return std::string(ell);
+    }
+
+    for (size_t i = 0; i < s.size();) {
+        TStringView suf(s.c_str() + i, s.size() - i);
+        if (strwidth(suf) <= budget)
+            return std::string(ell) + std::string(suf);
+        size_t step = pathUtf8Next(s.c_str() + i, s.size() - i);
         if (step == 0)
             step = 1;
         i += step;
@@ -1884,8 +1936,6 @@ private:
     }
 };
 
-using WelcomeActionButton = CleanButton;
-
 static std::string asciiLower(std::string s) {
     for (char &c : s)
         c = char(std::tolower((unsigned char)c));
@@ -1939,12 +1989,12 @@ public:
         growMode = gfGrowHiX | gfGrowLoY | gfGrowHiY;
     }
 
-    virtual TPalette &getPalette() const override {
+    TPalette &getPalette() const override {
         static TPalette palette("\x02\x03\x04\x05\x06\x07", 6);
         return palette;
     }
 
-    virtual void draw() override {
+    void draw() override {
         TDrawBuffer b;
         TAttrPair cNormal = getColor(0x0301);
         TAttrPair cSelect = getColor(0x0604);
@@ -1955,16 +2005,19 @@ public:
 
         b.moveChar(0, ' ', cNormal, size.x);
         TAttrPair color = ((state & sfFocused) != 0) ? cSelect : cNormal;
-        short xf = 0, wf = 0, xt = 0, wt = 0;
-        twoButtonLayout(xf, wf, xt, wt);
-        if (wf > 0 && xf >= 0 && xf < size.x)
-            b.moveStr(ushort(xf), TStringView(kFolderLabel), TColorAttr(color), ushort(size.x - xf));
-        if (wt > 0 && xt >= 0 && xt < size.x)
-            b.moveStr(ushort(xt), TStringView(kTxtLabel), TColorAttr(color), ushort(size.x - xt));
+        const BtnLayout L = layoutForWidth();
+        if (L.wf > 0 && L.folderStr && L.xf >= 0 && L.xf < size.x) {
+            const ushort room = ushort(std::max(0, int(size.x) - int(L.xf)));
+            b.moveStr(ushort(L.xf), TStringView(L.folderStr, (unsigned)L.wf), TColorAttr(color), room);
+        }
+        if (L.wt > 0 && L.txtStr && L.xt >= 0 && L.xt < size.x) {
+            const ushort room = ushort(std::max(0, int(size.x) - int(L.xt)));
+            b.moveStr(ushort(L.xt), TStringView(L.txtStr, (unsigned)L.wt), TColorAttr(color), room);
+        }
         writeLine(0, 1, size.x, 1, b);
     }
 
-    virtual void handleEvent(TEvent &event) override {
+    void handleEvent(TEvent &event) override {
         TView::handleEvent(event);
         if (event.what == evMouseDown) {
             TPoint p = makeLocal(event.mouse.where);
@@ -1981,32 +2034,73 @@ public:
         }
     }
 
-private:
-    static constexpr const char kFolderLabel[] = "[ Carpeta ]";
-    static constexpr const char kTxtLabel[] = "[ .txt ]";
+    void changeBounds(const TRect &bounds) override {
+        const short pw = size.x;
+        const short ph = size.y;
+        TView::changeBounds(bounds);
+        if ((size.x != pw || size.y != ph) && TProgram::application)
+            message(TProgram::application, evBroadcast, cmNavPanelLayoutChanged, this);
+    }
 
-    void twoButtonLayout(short &outXF, short &outWF, short &outXT, short &outWT) const {
-        outWF = short(sizeof(kFolderLabel) - 1);
-        outWT = short(sizeof(kTxtLabel) - 1);
-        const int gap = 2;
-        const int total = int(outWF) + gap + int(outWT);
+private:
+    struct BtnLayout {
+        short xf {0};
+        short wf {0};
+        short xt {0};
+        short wt {0};
+        const char *folderStr {nullptr};
+        const char *txtStr {nullptr};
+    };
+
+    BtnLayout layoutForWidth() const {
+        BtnLayout L;
+        static constexpr const char kLongF[] = "[ Carpeta ]";
+        static constexpr const char kLongT[] = "[ .txt ]";
+        static constexpr const char kMidF[] = "[Carpeta]";
+        static constexpr const char kMidT[] = "[.txt]";
+        static constexpr const char kShortF[] = "[D]";
+        static constexpr const char kShortT[] = "[T]";
+        const char *f = kLongF;
+        const char *t = kLongT;
+        L.wf = short(sizeof(kLongF) - 1);
+        L.wt = short(sizeof(kLongT) - 1);
+        int gap = 2;
+        auto wtotal = [&]() { return int(L.wf) + gap + int(L.wt); };
+
+        if (wtotal() > int(size.x)) {
+            f = kMidF;
+            t = kMidT;
+            L.wf = short(sizeof(kMidF) - 1);
+            L.wt = short(sizeof(kMidT) - 1);
+        }
+        if (wtotal() > int(size.x)) {
+            f = kShortF;
+            t = kShortT;
+            L.wf = short(sizeof(kShortF) - 1);
+            L.wt = short(sizeof(kShortT) - 1);
+            gap = 1;
+        }
+        const int total = int(L.wf) + gap + int(L.wt);
         int start = (int(size.x) - total) / 2;
         if (start < 0)
             start = 0;
-        outXF = short(start);
-        outXT = short(start + int(outWF) + gap);
+        if (start + total > int(size.x))
+            start = std::max(0, int(size.x) - total);
+        L.xf = short(start);
+        L.xt = short(start + int(L.wf) + gap);
+        L.folderStr = f;
+        L.txtStr = t;
+        return L;
     }
 
     bool hitFolder(int px) const {
-        short xf = 0, wf = 0, xt = 0, wt = 0;
-        twoButtonLayout(xf, wf, xt, wt);
-        return px >= int(xf) && px < int(xf) + int(wf);
+        const BtnLayout L = layoutForWidth();
+        return px >= int(L.xf) && px < int(L.xf) + int(L.wf);
     }
 
     bool hitTxt(int px) const {
-        short xf = 0, wf = 0, xt = 0, wt = 0;
-        twoButtonLayout(xf, wf, xt, wt);
-        return px >= int(xt) && px < int(xt) + int(wt);
+        const BtnLayout L = layoutForWidth();
+        return px >= int(L.xt) && px < int(L.xt) + int(L.wt);
     }
 };
 
@@ -2113,8 +2207,9 @@ public:
             b.moveChar(0, ' ', attrFill, size.x);
             if (idx >= 0 && idx < (int)items.size()) {
                 const NavItem &it = items[idx];
-                std::string line = treePrefix(idx) + it.label;
-                b.moveStr(0, line.c_str(), attrText, size.x);
+                const std::string line = treePrefix(idx) + it.label;
+                const std::string shown = labelTailForWidth(line, (int)size.x);
+                b.moveStr(0, TStringView(shown.c_str(), shown.size()), attrText, size.x);
             }
             writeLine(0, y, size.x, 1, b);
         }
@@ -2396,6 +2491,21 @@ private:
     }
 };
 
+/** Listado principal del panel de archivos: avisa al redimensionar para retitular/truncar la ruta. */
+class MainPanelNavigatorListView : public NavigatorListView {
+public:
+    MainPanelNavigatorListView(const TRect &bounds, const ushort *themeText, const ushort *themeBack) noexcept :
+        NavigatorListView(bounds, themeText, themeBack) {}
+
+    void changeBounds(const TRect &bounds) override {
+        const short pw = size.x;
+        const short ph = size.y;
+        NavigatorListView::changeBounds(bounds);
+        if ((size.x != pw || size.y != ph) && TProgram::application)
+            message(TProgram::application, evBroadcast, cmNavPanelLayoutChanged, this);
+    }
+};
+
 /** Lista para Escena visual: al cambiar cursor dispara refresco del preview en vivo. */
 class VisualSceneListView : public NavigatorListView {
 public:
@@ -2590,6 +2700,22 @@ private:
     }
 };
 
+/**
+ * Checkbox de "incluir assets": paleta plana como texto estatico del dialogo (evita franja de color de cluster)
+ * y lectura fiable del bit antes de destruir el dialogo.
+ */
+class FolderAssetsCheckBoxes : public TCheckBoxes {
+public:
+    FolderAssetsCheckBoxes(const TRect &bounds, TSItem *strings) noexcept : TCheckBoxes(bounds, strings) {}
+
+    bool wantsAssets() const noexcept { return (value & 1u) != 0; }
+
+    TPalette &getPalette() const override {
+        static TPalette palette("\x06\x06\x06\x06\x06", 5);
+        return palette;
+    }
+};
+
 class AppearanceDialog : public TDialog {
 public:
     AppearanceDialog(TRect bounds, ushort fg, ushort bg, char pat, const std::string &patUtf8, int autoSaveSec) :
@@ -2700,106 +2826,6 @@ public:
     }
 };
 
-static size_t utf8GlyphByteLen(const char *p, size_t maxRemain) noexcept {
-    if (maxRemain == 0 || !p || !p[0]) return 0;
-    unsigned char c = (unsigned char)*p;
-    if (c < 0x80) return 1;
-    if ((c & 0xE0) == 0xC0) return maxRemain >= 2 ? 2 : 1;
-    if ((c & 0xF0) == 0xE0) return maxRemain >= 3 ? 3 : 1;
-    if ((c & 0xF8) == 0xF0) return maxRemain >= 4 ? 4 : 1;
-    return 1;
-}
-
-/** Decodifica un codepoint UTF-8 ya segmentado con utf8GlyphByteLen. */
-static uint32_t utf8CodepointN(const char *p, size_t step) noexcept {
-    if (step == 0 || !p) return 0;
-    const unsigned char c0 = (unsigned char)p[0];
-    if (step == 1) return c0;
-    if (step == 2 && (c0 & 0xE0u) == 0xC0u)
-        return (uint32_t(c0 & 0x1Fu) << 6) | (uint32_t((unsigned char)p[1]) & 0x3Fu);
-    if (step == 3 && (c0 & 0xF0u) == 0xE0u)
-        return (uint32_t(c0 & 0x0Fu) << 12) | ((uint32_t((unsigned char)p[1]) & 0x3Fu) << 6) |
-               (uint32_t((unsigned char)p[2]) & 0x3Fu);
-    if (step == 4 && (c0 & 0xF8u) == 0xF0u)
-        return (uint32_t(c0 & 0x07u) << 18) | ((uint32_t((unsigned char)p[1]) & 0x3Fu) << 12) |
-               ((uint32_t((unsigned char)p[2]) & 0x3Fu) << 6) | (uint32_t((unsigned char)p[3]) & 0x3Fu);
-    return 0;
-}
-
-/** Trazos dobles del bloque Box Drawing (═ ║ ╔ ╗ ╚ ╝ …), no el bloque sólido █. */
-static bool isDoubleStrokeBoxDrawing(uint32_t cp) noexcept {
-    return cp >= 0x2550u && cp <= 0x256Cu;
-}
-
-static std::vector<std::string> welcomeBannerLines() {
-    return {
-        u8R"BW(██████╗ ███████╗████████╗██████╗  ██████╗     )BW",
-        u8R"BW(██╔══██╗██╔════╝╚══██╔══╝██╔══██╗██╔═══██╗    )BW",
-        u8R"BW(██████╔╝█████╗     ██║   ██████╔╝██║   ██║    )BW",
-        u8R"BW(██╔══██╗██╔══╝     ██║   ██╔══██╗██║   ██║    )BW",
-        u8R"BW(██║  ██║███████╗   ██║   ██║  ██║╚██████╔╝    )BW",
-        u8R"BW(╚═╝  ╚═╝╚══════╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝     )BW",
-        u8R"BW(                                              )BW",
-        u8R"BW(██╗    ██╗██████╗ ██╗████████╗███████╗██████╗ )BW",
-        u8R"BW(██║    ██║██╔══██╗██║╚══██╔══╝██╔════╝██╔══██╗)BW",
-        u8R"BW(██║ █╗ ██║██████╔╝██║   ██║   █████╗  ██████╔╝)BW",
-        u8R"BW(██║███╗██║██╔══██╗██║   ██║   ██╔══╝  ██╔══██╗)BW",
-        u8R"BW(╚███╔███╔╝██║  ██║██║   ██║   ███████╗██║  ██║)BW",
-        u8R"BW( ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝)BW",
-        u8R"BW(                                              )BW",
-    };
-}
-
-class RainbowBannerView : public TView {
-public:
-    RainbowBannerView(const TRect &bounds, std::vector<std::string> rows, const ushort *bgCol,
-                      const ushort *fgCol) noexcept :
-        TView(bounds), lines(std::move(rows)), bgColor(bgCol), fgColor(fgCol) {
-        growMode = gfGrowHiX | gfGrowHiY;
-    }
-
-    void draw() override {
-        TDrawBuffer b;
-        const ushort bgv = bgColor ? (*bgColor & 0xFF) : ushort(1);
-        const ushort fgv = fgColor ? (*fgColor & 0xFF) : ushort(15);
-        const TColorDesired bgDes(TColorXTerm(uchar((ushort)bgv)));
-        const TColorDesired fgLetters(TColorXTerm(uchar((ushort)fgv)));
-        const TColorDesired fgLineBlack(TColorRGB(0, 0, 0));
-        const short mx = 1;
-        const short my = 1;
-        const int nLines = (int)lines.size();
-        for (short y = 0; y < size.y; ++y) {
-            const TColorAttr fill(TColorDesired(TColorXTerm(uchar((ushort)7))), bgDes);
-            b.moveChar(0, ' ', fill, size.x);
-            if (y >= my && y < my + nLines) {
-                const std::string &ln = lines[(size_t)(y - my)];
-                short x = mx;
-                for (size_t i = 0; i < ln.size() && x < size.x;) {
-                    const size_t len = utf8GlyphByteLen(ln.c_str() + i, ln.size() - i);
-                    const size_t step = len ? len : 1;
-                    const char *gp = ln.c_str() + i;
-                    const uint32_t cp = utf8CodepointN(gp, step);
-                    TColorAttr cell;
-                    if (step == 1 && (unsigned char)*gp == ' ')
-                        cell = TColorAttr(bgDes, bgDes);
-                    else if (isDoubleStrokeBoxDrawing(cp))
-                        cell = TColorAttr(fgLineBlack, bgDes);
-                    else
-                        cell = TColorAttr(fgLetters, bgDes);
-                    b.moveStr(x, gp, cell, 1);
-                    i += step;
-                    ++x;
-                }
-            }
-            writeLine(0, y, size.x, 1, b);
-        }
-    }
-
-private:
-    std::vector<std::string> lines;
-    const ushort *bgColor;
-    const ushort *fgColor;
-};
 
 /** Vista previa RGB en el dialogo Biblioteca visual (bloques U+2580). Clic = comando de archivo (mismo que Buscar). */
 class LibraryImagePreview : public TView {
@@ -3326,22 +3352,6 @@ public:
     }
 };
 
-class WelcomeDialog : public TDialog {
-public:
-    WelcomeDialog(const TRect &bounds, TStringView aTitle) noexcept :
-        TWindowInit(&TDialog::initFrame),
-        TDialog(bounds, aTitle) {
-        palette = dpBlueDialog;
-    }
-
-    virtual TColorAttr mapColor(uchar index) override {
-        /* Sombra de botón forzada a negro sólido para que no parezca transparente sobre otras vistas. */
-        if (index == 0x2E || index == 0x4E || index == 0x6E)
-            return TColorAttr(0x00);
-        return TDialog::mapColor(index);
-    }
-};
-
 class UnicodeBackground : public TBackground {
 public:
     UnicodeBackground(const TRect &bounds, const std::string &patternUtf8,
@@ -3848,12 +3858,196 @@ public:
         eventMask |= evMouseWheel;
     }
 
+    struct UndoSnapshot {
+        std::string text;
+        uint curPtr {0};
+        int dx {0};
+        int dy {0};
+    };
+
+    std::string makeSnapshotText() {
+        std::string s;
+        if (bufLen == 0)
+            return s;
+        s.resize((size_t)bufLen);
+        getText(0, TSpan<char>(&s[0], bufLen));
+        return s;
+    }
+
+    UndoSnapshot makeUndoSnapshot() {
+        UndoSnapshot snap;
+        snap.text = makeSnapshotText();
+        snap.curPtr = curPtr;
+        snap.dx = delta.x;
+        snap.dy = delta.y;
+        return snap;
+    }
+
+    void restoreSnapshot(const UndoSnapshot &snap) {
+        restoringSnapshot = true;
+        setBufLen(0);
+        if (!snap.text.empty())
+            insertText(snap.text.data(), (uint)snap.text.size(), False);
+        const uint targetCur = std::min<uint>(snap.curPtr, bufLen);
+        setCurPtr(targetCur, 0);
+        scrollTo(snap.dx, snap.dy);
+        restoringSnapshot = false;
+        update(ufView);
+    }
+
     void handleEvent(TEvent &event) override {
+        if (event.what == evKeyDown) {
+            /* Fallback para terminales donde Ctrl+Shift+Flecha llega igual que Ctrl+Flecha. */
+            const auto &kd = event.keyDown;
+            if (kd.keyCode == kbCtrlZ || kd.charScan.charCode == 26) {
+                if (!undoSnapshots.empty()) {
+                    const UndoSnapshot snap = undoSnapshots.back();
+                    undoSnapshots.pop_back();
+                    restoreSnapshot(snap);
+                }
+                clearEvent(event);
+                return;
+            }
+            /* Fallback ANSI CSI: cubre variantes de Ctrl+Shift+Flechas/Home/End entre terminales. */
+            auto parseCsiMoveCmd = [&](const TEvent &ev) -> ushort {
+                const auto &k = ev.keyDown;
+                if (k.textLength < 4 || k.text[0] != 27 || k.text[1] != '[')
+                    return 0;
+                std::string seq(k.text, k.text + k.textLength);
+                const char tail = seq.back();
+                if (tail != 'D' && tail != 'C' && tail != 'H' && tail != 'F' && tail != '~')
+                    return 0;
+                std::vector<int> params;
+                int current = 0;
+                bool haveNum = false;
+                for (size_t i = 2; i + 1 < seq.size(); ++i) {
+                    const char ch = seq[i];
+                    if (ch >= '0' && ch <= '9') {
+                        current = current * 10 + (ch - '0');
+                        haveNum = true;
+                    } else if (ch == ';') {
+                        params.push_back(haveNum ? current : 0);
+                        current = 0;
+                        haveNum = false;
+                    } else {
+                        return 0;
+                    }
+                }
+                if (haveNum)
+                    params.push_back(current);
+                int mod = 0;
+                if (params.size() >= 2)
+                    mod = params[1];
+                else if (params.size() == 1)
+                    mod = params[0];
+                /* 5=Ctrl, 6=Ctrl+Shift, 7/8=Alt variants con Ctrl (segun emulador). */
+                if (mod != 5 && mod != 6 && mod != 7 && mod != 8)
+                    return 0;
+                if (tail == '~') {
+                    const int lead = params.empty() ? 0 : params[0];
+                    if (lead == 1 || lead == 7)
+                        return cmTextStart;
+                    if (lead == 4 || lead == 8)
+                        return cmTextEnd;
+                    return 0;
+                }
+                switch (tail) {
+                    case 'D': return cmWordLeft;
+                    case 'C': return cmWordRight;
+                    case 'H': return cmTextStart;
+                    case 'F': return cmTextEnd;
+                    default: return 0;
+                }
+            };
+            const ushort csiMoveCmd = parseCsiMoveCmd(event);
+            if (csiMoveCmd != 0) {
+                message(this, evCommand, cmStartSelect, nullptr);
+                message(this, evCommand, csiMoveCmd, nullptr);
+                clearEvent(event);
+                return;
+            }
+            const bool ctrlHeld = (kd.controlKeyState & kbCtrlShift) != 0;
+            ushort moveCmd = 0;
+            switch (kd.keyCode) {
+                case kbCtrlLeft: moveCmd = cmWordLeft; break;
+                case kbCtrlRight: moveCmd = cmWordRight; break;
+                case kbCtrlHome: moveCmd = cmTextStart; break;
+                case kbCtrlEnd: moveCmd = cmTextEnd; break;
+                /* Algunos emuladores reportan variantes Alt para Ctrl+Shift+Flecha. */
+                case kbAltLeft: moveCmd = cmWordLeft; break;
+                case kbAltRight: moveCmd = cmWordRight; break;
+                case kbAltHome: moveCmd = cmTextStart; break;
+                case kbAltEnd: moveCmd = cmTextEnd; break;
+                case kbLeft:
+                    /* Algunos terminales pierden Shift cuando va junto con Ctrl+Flecha. */
+                    if (ctrlHeld) moveCmd = cmWordLeft;
+                    break;
+                case kbRight:
+                    if (ctrlHeld) moveCmd = cmWordRight;
+                    break;
+                case kbHome:
+                    if (ctrlHeld) moveCmd = cmTextStart;
+                    break;
+                case kbEnd:
+                    if (ctrlHeld) moveCmd = cmTextEnd;
+                    break;
+                default: break;
+            }
+            if (moveCmd != 0) {
+                message(this, evCommand, cmStartSelect, nullptr);
+                message(this, evCommand, moveCmd, nullptr);
+                clearEvent(event);
+                return;
+            }
+        }
+        auto runEditorContextMenu = [&](TPoint whereGlobal) -> bool {
+            TGroup *g = owner;
+            while (g && dynamic_cast<TDeskTop *>(g) == nullptr)
+                g = g->owner;
+            TDeskTop *desk = dynamic_cast<TDeskTop *>(g);
+            if (!desk)
+                return false;
+
+            TMenuItem *chain = new TMenuItem("~U~ndo", cmUndo, kbCtrlZ, hcNoContext, "Ctrl-Z");
+            chain = new TMenuItem("~P~egar", cmPaste, kbCtrlV, hcNoContext, "Ctrl-V", chain);
+            chain = new TMenuItem("~C~opiar", cmCopy, kbCtrlC, hcNoContext, "Ctrl-C", chain);
+            chain = new TMenuItem("Cor~t~ar", cmCut, kbCtrlX, hcNoContext, "Ctrl-X", chain);
+
+            TRect bounds(whereGlobal, whereGlobal);
+            TMenu *menu = new TMenu(*chain);
+            TMenuPopup *menuPopup = new TMenuPopup(bounds, menu);
+            rwAutoPlaceMenuPopupOnDesk(desk, menuPopup, whereGlobal);
+            const ushort cmd = desk->execView(menuPopup);
+            TObject::destroy(menuPopup);
+            if (cmd == cmCut || cmd == cmCopy || cmd == cmPaste || cmd == cmUndo)
+                message(this, evCommand, cmd, nullptr);
+            return true;
+        };
+
+        if (event.what == evMouseDown && (event.mouse.buttons & mbRightButton) != 0) {
+            runEditorContextMenu(event.mouse.where);
+            clearEvent(event);
+            return;
+        }
+        if (event.what == evKeyDown && event.keyDown.keyCode == kbShiftF10) {
+            TPoint p = makeGlobal(TPoint{1, 1});
+            runEditorContextMenu(p);
+            clearEvent(event);
+            return;
+        }
+
         auto isTypingLikeKey = [](const TEvent &ev) -> bool {
             if (ev.what != evKeyDown)
                 return false;
             const auto &kd = ev.keyDown;
+            const bool ctrlHeld = (kd.controlKeyState & kbCtrlShift) != 0;
             const uchar ch = uchar(kd.charScan.charCode);
+            if (kd.keyCode == kbCtrlZ || kd.keyCode == kbCtrlC || kd.keyCode == kbCtrlX || kd.keyCode == kbCtrlV ||
+                ch == 26 || ch == 3 || ch == 24 || ch == 22)
+                return false;
+            /* Atajos Ctrl no deben activar la heurística de autoscroll de tecleo. */
+            if (ctrlHeld && (kd.controlKeyState & kbPaste) == 0)
+                return false;
             if (kd.textLength > 0)
                 return true;
             if (ch == 9 || ch == 13 || ch == 8)
@@ -3894,10 +4088,22 @@ public:
             clearEvent(event);
             return;
         }
+        const bool mayModify = (event.what == evKeyDown || event.what == evCommand);
+        UndoSnapshot before;
+        if (!restoringSnapshot && mayModify)
+            before = makeUndoSnapshot();
         const bool typingLike = isTypingLikeKey(event);
         const int oldDy = delta.y;
         const int oldDx = delta.x;
         TFileEditor::handleEvent(event);
+        if (!restoringSnapshot && mayModify) {
+            std::string after = makeSnapshotText();
+            if (after != before.text) {
+                undoSnapshots.push_back(std::move(before));
+                if (undoSnapshots.size() > 512)
+                    undoSnapshots.erase(undoSnapshots.begin());
+            }
+        }
         if (typingLike) {
             const int newDx = delta.x;
             const int newDy = delta.y;
@@ -3925,6 +4131,10 @@ public:
                 vScrollBar->hide();
         }
     }
+
+private:
+    std::vector<UndoSnapshot> undoSnapshots;
+    bool restoringSnapshot {false};
 };
 
 /** Marco del editor con borde simple siempre (activo/inactivo), manteniendo eventos normales de TFrame. */
@@ -4049,6 +4259,154 @@ public:
     }
 };
 
+class RetroWriterTVApp;
+
+class ReadOnlyLineView : public TView {
+public:
+    explicit ReadOnlyLineView(const TRect &bounds, const std::string *textPtr) noexcept :
+        TView(bounds), textPtr(textPtr) {}
+
+    void draw() override {
+        TDrawBuffer b;
+        const TColorAttr cell = getColor(1);
+        b.moveChar(0, ' ', cell, size.x);
+        const std::string src = textPtr ? *textPtr : std::string{};
+        if (!src.empty()) {
+            std::string s = src;
+            if ((int)s.size() > size.x)
+                s.resize((size_t)size.x);
+            b.moveStr(0, TStringView(s), cell, size.x);
+        }
+        writeLine(0, 0, size.x, 1, b);
+    }
+
+private:
+    const std::string *textPtr {nullptr};
+};
+
+class ClockMenuBar : public TMenuBar {
+public:
+    using TMenuBar::TMenuBar;
+
+    void draw() override {
+        TMenuBar::draw();
+        std::time_t tt = std::time(nullptr);
+        struct tm tm {};
+#if defined(_WIN32)
+        localtime_s(&tm, &tt);
+#else
+        localtime_r(&tt, &tm);
+#endif
+        char buf[6] = {};
+        if (std::strftime(buf, sizeof buf, "%H:%M", &tm) > 0) {
+            TDrawBuffer b;
+            const TColorAttr cell = getColor(1);
+            const int len = (int)std::strlen(buf);
+            b.moveStr(0, TStringView(buf), cell, len);
+            const int x = std::max(0, size.x - len - 1);
+            writeLine(x, 0, len, 1, b);
+        }
+    }
+};
+
+/** Asistente Crear con IA: modo de prompt, solicitud a endpoint/OpenAI/plantilla, carpeta bajo el panel actual. */
+class CrearConIADialog : public TDialog {
+public:
+    RetroWriterTVApp *app {nullptr};
+    TRadioButtons *modes {nullptr};
+    ReadOnlyLineView *ideaLine {nullptr};
+    ReadOnlyLineView *baseDirLine {nullptr};
+    TInputLine *folderLine {nullptr};
+    ReadOnlyLineView *daysLine {nullptr};
+    ReadOnlyLineView *statusLine {nullptr};
+    char ideaData[500] {};
+    char daysData[16] {};
+    /** Ultimo plazo (1..7) devuelto por la IA en Solicitar; 0 = sin dato (al crear se usa azar). */
+    int iaDeadlineDays {0};
+    /** Modo IA elegido automaticamente en la ultima solicitud; -1 = no solicitado aun. */
+    int selectedMode { -1 };
+    char baseDirData[MAXPATH] {};
+    std::string ideaText;
+    std::string baseDirText;
+    std::string daysText;
+    std::string statusText;
+
+    CrearConIADialog(const TRect &bounds, RetroWriterTVApp *ap, const std::string &baseDirHint,
+                     const std::string &folderHint) :
+        TWindowInit(&TDialog::initFrame),
+        TDialog(bounds, "Crear con IA"),
+        app(ap) {
+        options |= ofCentered;
+        palette = dpBlueDialog;
+
+        modes = new TRadioButtons(
+            TRect(3, 3, 72, 10),
+            new TSItem("~F~rases cortas",
+                new TSItem("~D~iez palabras",
+                    new TSItem("~C~inco palabras",
+                        new TSItem("Palabra ~j~aponesa",
+                            new TSItem("3 palabras ~n~o comunes",
+                                new TSItem("3 palabras ~r~andom", nullptr)))))));
+        insert(modes);
+        ushort zm = 0;
+        modes->setData(&zm);
+        modes->setState(sfDisabled, True);
+
+        ideaLine = new ReadOnlyLineView(TRect(3, 12, 75, 13), &ideaText);
+        insert(ideaLine);
+        insert(new TLabel(TRect(3, 11, 44, 12), "Idea", ideaLine));
+
+        baseDirLine = new ReadOnlyLineView(TRect(3, 15, 75, 16), &baseDirText);
+        insert(baseDirLine);
+        insert(new TLabel(TRect(3, 14, 48, 15), "Ubicación", baseDirLine));
+
+        folderLine = new TInputLine(TRect(3, 18, 53, 19), MAX_TITLE - 1);
+        insert(folderLine);
+        insert(new TLabel(TRect(3, 17, 25, 18), "Nombre carpeta:", folderLine));
+
+        daysLine = new ReadOnlyLineView(TRect(56, 18, 75, 19), &daysText);
+        insert(daysLine);
+        insert(new TLabel(TRect(56, 17, 75, 18), "Dias sugeridos", daysLine));
+
+        statusLine = new ReadOnlyLineView(TRect(3, 21, 75, 22), &statusText);
+        insert(statusLine);
+        insert(new TLabel(TRect(3, 20, 22, 21), "Estado IA", statusLine));
+
+        insert(new TButton(TRect(3, 23, 22, 25), "Solicitar", cmIaSolicitar, bfNormal));
+        insert(new TButton(TRect(24, 23, 40, 25), "Crear", cmOK, bfDefault));
+        insert(new TButton(TRect(44, 23, 62, 25), "Cancelar", cmCancel, bfNormal));
+
+        std::memset(baseDirData, 0, sizeof baseDirData);
+        if (!trim(baseDirHint).empty())
+            std::snprintf(baseDirData, sizeof baseDirData, "%s", baseDirHint.c_str());
+        baseDirText = baseDirData;
+        baseDirLine->drawView();
+
+        if (!folderHint.empty()) {
+            char fd[MAX_TITLE - 1] = {};
+            std::snprintf(fd, sizeof fd, "%s", folderHint.c_str());
+            folderLine->setData(fd);
+        }
+        std::memset(ideaData, 0, sizeof ideaData);
+        ideaText = ideaData;
+        std::memset(daysData, 0, sizeof daysData);
+        std::snprintf(daysData, sizeof daysData, "-");
+        if (daysLine)
+            daysText = daysData;
+        statusText = "Listo";
+    }
+
+    void handleEvent(TEvent &event) override {
+        if (event.what == evCommand && event.message.command == cmIaSolicitar) {
+            if (TProgram::application)
+                message(TProgram::application, evBroadcast, cmIaSolicitar, this);
+            clearEvent(event);
+            return;
+        }
+        TDialog::handleEvent(event);
+    }
+};
+
 class RetroWriterTVApp : public TApplication {
 public:
     RetroWriterTVApp(const std::string &projectDir) :
@@ -4057,7 +4415,10 @@ public:
                   &RetroWriterTVApp::initDeskTop),
         projectDir(projectDir),
         preferencesPath(joinPath(projectDir, "appearance.cfg")),
-        workspacePath(joinPath(projectDir, "workspace.cfg")) {
+        workspacePath(joinPath(projectDir, "workspace.cfg")),
+        iaWriterCfgPath(joinPath(projectDir, "ia_writer.cfg")),
+        iaRegistryPath(joinPath(projectDir, "ia_escrituras.jsonl")),
+        iaRequestsPath(joinPath(projectDir, "ia_solicitudes.jsonl")) {
         loadAppearancePreferences();
         fillPaletteExplicit(textColor, backColor, paletteBytes);
         /* cwd del panel: "/" por defecto; workspace.cfg lo restaura si existe. */
@@ -4087,14 +4448,13 @@ public:
 
     static TMenuBar *initMenuBar(TRect r) {
         r.b.y = r.a.y + 1;
-        return new TMenuBar(
+        return new ClockMenuBar(
             r,
             *new TSubMenu("~F~ile", kbAltF) +
                 *new TMenuItem("~G~uardar", cmSave, TKey('S', kbCtrlShift), hcNoContext, "Ctrl-S") +
                 *new TMenuItem("G~u~ardar como...", cmSaveAs, TKey('S', kbCtrlShift | kbShift), hcNoContext,
                                "Ctrl-Mayus-S") +
                 newLine() +
-                *new TMenuItem("~B~ienvenida", cmWelcome, kbF2, hcNoContext, "F2") +
                 *new TMenuItem("E~x~it", cmQuit, kbCtrlQ, hcNoContext, "Ctrl-Q") +
             *new TSubMenu("~W~indows", kbAltW) +
                 *new TMenuItem("~P~anel archivos (Ctrl+E)", cmToggleFilePanel, kbCtrlE, hcNoContext, "Ctrl-E") +
@@ -4107,7 +4467,12 @@ public:
             *new TSubMenu("~P~referencias", kbAltP) +
                 *new TMenuItem("~C~olores, fondo y autoguardado...", cmPreferences, kbF5, hcNoContext, "F5") +
                 *new TMenuItem("~E~scena visual (capitulo)...", cmVisualScene, TKey(), hcNoContext, 0) +
-                *new TMenuItem("Agregar elemento ~v~isual...", cmVisualLibrary, TKey(), hcNoContext, 0)
+                *new TMenuItem("Agregar elemento ~v~isual...", cmVisualLibrary, TKey(), hcNoContext, 0) +
+            *new TSubMenu("Crear con ~I~A", kbAltI) +
+                *new TMenuItem("Configurar IA...", cmIaConfig, TKey(), hcNoContext, 0) +
+                *new TMenuItem("Crear con IA...", cmCrearConIA, TKey(), hcNoContext, 0) +
+                *new TMenuItem("Entregar escritura IA...", cmEntregarIA, TKey(), hcNoContext, 0) +
+                *new TMenuItem("Resumen IA...", cmIaResumen, TKey(), hcNoContext, 0)
         );
     }
 
@@ -4117,7 +4482,6 @@ public:
             r,
             *new TStatusDef(0, 0xFFFF) +
                 *new TStatusItem("~Ctrl-S~ Guardar", TKey('S', kbCtrlShift), cmSave) +
-                *new TStatusItem("~F2~ Welcome", kbF2, cmWelcome) +
                 *new TStatusItem("~Ctrl-E~ Panel archivos", kbCtrlE, cmToggleFilePanel) +
                 *new TStatusItem("~F5~ Preferencias", kbF5, cmPreferences) +
                 *new TStatusItem("~Ctrl-Q~ Salir", kbCtrlQ, cmQuit) +
@@ -4150,13 +4514,22 @@ public:
             return uchar(XTerm256toXTerm16(uchar(c & 0xFF)) & 0x0F);
         };
 
+        TColorAttr out;
+        /* cpEditor:
+           - índice 6: texto normal
+           - índice 7: texto seleccionado (forzamos contraste invirtiendo fg/bg) */
+        if (index == 7) {
+            /* Seleccion visible SIEMPRE en rutas de color BIOS de TEditor (TAttrPair). */
+            out = TColorAttr(0x70);
+            return out;
+        }
+
         uchar fg16 = toBios16(textColor);
         uchar bg16 = toBios16(backColor);
         uchar bios = base.toBIOS();
         uchar srcFg = uchar(bios & 0x0F);
         uchar srcBg = uchar((bios >> 4) & 0x0F);
 
-        TColorAttr out;
         /* La inversión fg/bg del atributo base se conserva al mapear a xterm-256. */
         bool swapped = (srcFg == bg16 && srcBg == fg16);
         if (swapped) {
@@ -4249,6 +4622,7 @@ public:
     }
 
     virtual void handleEvent(TEvent &event) {
+
         if (event.what == evMouseWheel && navListView && (navListView->state & sfFocused) != 0) {
             navListView->handleEvent(event);
             if (event.what == evNothing)
@@ -4271,6 +4645,69 @@ public:
                 tryAutoSaveEditor();
         }
 
+        if (event.what == evBroadcast && event.message.command == cmIaSolicitar) {
+            auto *d = static_cast<CrearConIADialog *>(event.message.infoPtr);
+            if (d && d->modes && d->ideaLine) {
+                auto setStatus = [&](const std::string &s) {
+                    if (d->statusLine) {
+                        d->statusText = s;
+                        d->statusLine->drawView();
+                        TScreen::flushScreen();
+                    }
+                };
+                static std::mt19937 rng((unsigned)std::chrono::steady_clock::now().time_since_epoch().count());
+                std::uniform_int_distribution<int> distMode(0, 5);
+                const ushort mode = (ushort)distMode(rng);
+                d->selectedMode = (int)mode;
+                if (d->modes)
+                    d->modes->setData((void *)&mode);
+                ensureIaConfig();
+                std::string idea, err;
+                int dlim = 0;
+                setStatus("Enviando solicitud (modo random)...");
+                const bool ok = rw_ia::fetchIdea(iaConfig, (int)mode, idea, dlim, err, setStatus);
+                /* Loggea SIEMPRE (éxito o error), aunque el usuario no presione Crear. */
+                {
+                    std::time_t tnow = std::time(nullptr);
+                    struct tm tmb {};
+                    localtime_r(&tnow, &tmb);
+                    char ts[64];
+                    std::strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S", &tmb);
+                    std::ostringstream jl;
+                    jl << "{\"ts\":\"" << rw_ia::jsonEscapeString(ts) << "\",\"accion\":\"solicitar\""
+                       << ",\"modo\":" << (int)mode
+                       << ",\"ok\":" << (ok ? "true" : "false")
+                       << ",\"ubicacion\":\"" << rw_ia::jsonEscapeString(d->baseDirText) << "\""
+                       << ",\"idea\":\"" << rw_ia::jsonEscapeString(idea) << "\""
+                       << ",\"dias\":" << dlim
+                       << ",\"error\":\"" << rw_ia::jsonEscapeString(err) << "\"}";
+                    appendIaRequestLogJsonl(jl.str());
+                }
+
+                if (ok) {
+                    d->iaDeadlineDays = (dlim >= 1 && dlim <= 7) ? dlim : 0;
+                    std::memset(d->ideaData, 0, sizeof d->ideaData);
+                    std::snprintf(d->ideaData, sizeof d->ideaData, "%s", idea.c_str());
+                    d->ideaText = d->ideaData;
+                    d->ideaLine->drawView();
+                    if (d->daysLine) {
+                        std::memset(d->daysData, 0, sizeof d->daysData);
+                        if (d->iaDeadlineDays > 0)
+                            std::snprintf(d->daysData, sizeof d->daysData, "%d", d->iaDeadlineDays);
+                        else
+                            std::snprintf(d->daysData, sizeof d->daysData, "(azar)");
+                        d->daysText = d->daysData;
+                        d->daysLine->drawView();
+                    }
+                    setStatus("Recibido");
+                } else {
+                    setStatus("Error");
+                    messageBox(mfError | mfOKButton, "IA: %s", err.c_str());
+                }
+            }
+            clearEvent(event);
+            return;
+        }
         if (event.what == evBroadcast && event.message.command == cmNavSelect) {
             auto *src = static_cast<NavigatorListView *>(event.message.infoPtr);
             fileManagerActivate(src);
@@ -4280,6 +4717,16 @@ public:
 
         if (event.what == evBroadcast && event.message.command == cmCreateFolder) {
             onCreateFolderInBrowser();
+            clearEvent(event);
+            return;
+        }
+
+        if (event.what == evBroadcast && event.message.command == cmNavPanelLayoutChanged) {
+            updateNavWindowTitle();
+            if (navListView)
+                navListView->drawView();
+            if (navWindow)
+                navWindow->redraw();
             clearEvent(event);
             return;
         }
@@ -4309,10 +4756,6 @@ public:
                     mfInformation | mfOKButton);
                 clearEvent(event);
                 break;
-            case cmWelcome:
-                showWelcomeDialog();
-                clearEvent(event);
-                break;
             case cmRefreshWidgets:
                 reloadMiniPreviewImage();
                 syncFilePanelListing();
@@ -4327,6 +4770,22 @@ public:
                 break;
             case cmPreferences:
                 showPreferencesDialog();
+                clearEvent(event);
+                break;
+            case cmIaConfig:
+                showIaConfigDialog();
+                clearEvent(event);
+                break;
+            case cmCrearConIA:
+                showCrearConIADialog();
+                clearEvent(event);
+                break;
+            case cmEntregarIA:
+                showEntregarIADialog();
+                clearEvent(event);
+                break;
+            case cmIaResumen:
+                showIaResumenDialog();
                 clearEvent(event);
                 break;
             case cmVisualScene:
@@ -4366,6 +4825,11 @@ private:
     std::string projectDir;
     std::string preferencesPath;
     std::string workspacePath;
+    std::string iaWriterCfgPath;
+    std::string iaRegistryPath;
+    std::string iaRequestsPath;
+    rw_ia::Config iaConfig {};
+    bool iaConfigLoaded {false};
     /** Directorio mostrado en el File Manager (explorador). */
     std::string browserDir;
     /** Ultimo archivo abierto en el editor (sesion y reapertura). */
@@ -5697,7 +6161,8 @@ private:
         if (!navWindow)
             return;
         const int navW = std::max(1, (int)navWindow->size.x);
-        std::string t = pathTitleForWidth(browserDir, navW - 2);
+        /* TFrame dibuja el titulo con moveStr(..., ancho <= size.x - 10); si pasamos de mas, recorta por la derecha y se pierde el sufijo. */
+        std::string t = pathTitleForWidth(browserDir, std::max(1, navW - 10));
         char *nt = newStr(TStringView(t.c_str(), t.size()));
         if (!nt)
             return;
@@ -5900,6 +6365,47 @@ private:
         return !outTitle.empty();
     }
 
+    bool promptFolderCreateOptions(std::string &outName, bool &outCreateAssets) {
+#pragma pack(push, 1)
+        struct Data {
+            char title[MAX_TITLE - 1];
+            ushort options;
+        } data = {};
+#pragma pack(pop)
+
+        TDialog *d = new TDialog(TRect(18, 6, 74, 17), "Crear carpeta");
+        d->options |= ofCentered;
+        d->palette = dpBlueDialog;
+
+        TInputLine *input = new TInputLine(TRect(4, 5, 52, 6), MAX_TITLE - 1);
+        d->insert(input);
+        d->insert(new TLabel(TRect(4, 4, 30, 5), "Nombre", input));
+        auto *assetsCb = new FolderAssetsCheckBoxes(TRect(4, 8, 58, 10),
+            new TSItem("~I~ncluir subcarpeta assets/", nullptr));
+        d->insert(assetsCb);
+        d->insert(new TButton(TRect(17, 12, 27, 14), "Crear", cmOK, bfDefault));
+        d->insert(new TButton(TRect(30, 12, 44, 14), "Cancelar", cmCancel, bfNormal));
+        d->setCurrent(input, normalSelect);
+
+        TView *v = TProgram::application->validView(d);
+        if (!v) {
+            destroy(d);
+            return false;
+        }
+        v->setData(&data);
+        ushort res = TProgram::deskTop->execView(v);
+        const bool assetsWanted = assetsCb->wantsAssets();
+        if (res != cmCancel)
+            v->getData(&data);
+        destroy(v);
+
+        if (res != cmOK)
+            return false;
+        outName = trim(data.title);
+        outCreateAssets = assetsWanted;
+        return !outName.empty();
+    }
+
     /**
      * Cierra el editor actual. Si hay cambios sin guardar y el usuario cancela el dialogo,
      * no se cierra (evita dejar un editor huerfano + otro nuevo = dos ventanas, scroll roto).
@@ -6056,7 +6562,8 @@ private:
 
     void onCreateFolderInBrowser() {
         std::string name;
-        if (!promptTitle("Carpeta", "Nombre", name)) return;
+        bool createAssets = false;
+        if (!promptFolderCreateOptions(name, createAssets)) return;
         name = trim(name);
         if (name.empty() || name == "." || name == "..") return;
         if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) return;
@@ -6064,6 +6571,13 @@ private:
         if (mkdir(path.c_str(), 0755) != 0 && errno != EEXIST) {
             messageBox(mfError | mfOKButton, "No se pudo crear la carpeta: %s", strerror(errno));
             return;
+        }
+        if (createAssets) {
+            const std::string assetsPath = joinPath(path, "assets");
+            if (mkdir(assetsPath.c_str(), 0755) != 0 && errno != EEXIST) {
+                messageBox(mfError | mfOKButton, "No se pudo crear assets/: %s", strerror(errno));
+                return;
+            }
         }
         browserDir = absolutePath(path);
         syncFilePanelListing();
@@ -6076,9 +6590,213 @@ private:
         return asciiLower(s.substr(s.size() - 4)) == ".txt";
     }
 
+    static std::string shellQuote(const std::string &s) {
+        std::string out;
+        out.push_back('\'');
+        for (char c : s) {
+            if (c == '\'')
+                out += "'\\''";
+            else
+                out.push_back(c);
+        }
+        out.push_back('\'');
+        return out;
+    }
+
+    std::string renderAsciiWithFontFile(const std::string &text, const std::string &fontFileAbs) const {
+        const std::string t = trim(text);
+        if (t.empty() || fontFileAbs.empty())
+            return {};
+        const std::string script = joinPath(projectDir, "tools/render_ascii.py");
+        const std::string cmd = "python3 " + shellQuote(script) + " --font-file " + shellQuote(fontFileAbs) +
+                                " --text " + shellQuote(t) + " 2>/dev/null";
+        FILE *fp = popen(cmd.c_str(), "r");
+        if (!fp)
+            return t;
+        std::string out;
+        char buf[4096];
+        while (std::fgets(buf, sizeof buf, fp))
+            out += buf;
+        const int st = pclose(fp);
+        if (st != 0 || out.empty())
+            return t;
+        return out;
+    }
+
+    std::vector<NavigatorListView::NavItem> asciiFontItems() const {
+        std::vector<NavigatorListView::NavItem> out;
+        std::error_code ec;
+        const fs::path dir = fs::path(projectDir) / "ascii_fonts";
+        if (fs::is_directory(dir, ec) && !ec) {
+            for (const auto &ent : fs::directory_iterator(dir, ec)) {
+                if (ec) break;
+                if (!ent.is_regular_file(ec) || ec) continue;
+                const std::string ext = asciiLower(ent.path().extension().string());
+                if (ext != ".flf" && ext != ".tlf")
+                    continue;
+                NavigatorListView::NavItem it;
+                it.label = ent.path().stem().string();
+                it.isDirectory = false;
+                it.fullPath = absolutePath(ent.path().string());
+                out.push_back(std::move(it));
+            }
+        }
+        std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) { return a.label < b.label; });
+        return out;
+    }
+
+    bool promptTxtTemplate(std::string &outFileName, std::string &outAsciiText, std::string &outFontFile) {
+        class AsciiPreviewView : public TView {
+        public:
+            const std::string *text {nullptr};
+            AsciiPreviewView(const TRect &bounds, const std::string *txt) noexcept : TView(bounds), text(txt) {}
+            void draw() override {
+                TDrawBuffer b;
+                const TColorAttr cell = getColor(1);
+                const std::string src = text ? *text : std::string{};
+                std::vector<std::string> lines;
+                size_t p = 0;
+                while (p <= src.size()) {
+                    size_t q = src.find('\n', p);
+                    if (q == std::string::npos) q = src.size();
+                    lines.push_back(src.substr(p, q - p));
+                    if (q == src.size()) break;
+                    p = q + 1;
+                }
+                for (short y = 0; y < size.y; ++y) {
+                    b.moveChar(0, ' ', cell, size.x);
+                    if ((size_t)y < lines.size()) {
+                        std::string row = lines[(size_t)y];
+                        if ((int)row.size() > size.x)
+                            row.resize((size_t)size.x);
+                        b.moveStr(0, TStringView(row), cell, size.x);
+                    }
+                    writeLine(0, y, size.x, 1, b);
+                }
+            }
+        };
+        class AsciiFontListView : public NavigatorListView {
+        public:
+            AsciiFontListView(const TRect &bounds, const ushort *themeText, const ushort *themeBack) noexcept :
+                NavigatorListView(bounds, themeText, themeBack) {}
+            void handleEvent(TEvent &event) override {
+                NavItem before {};
+                const bool hadBefore = peekCursorItem(before);
+                NavigatorListView::handleEvent(event);
+                NavItem after {};
+                const bool hadAfter = peekCursorItem(after);
+                const bool changed = hadBefore != hadAfter ||
+                    (hadBefore && hadAfter &&
+                     (before.fullPath != after.fullPath || before.label != after.label || before.isDirectory != after.isDirectory));
+                if (changed && owner)
+                    message(owner, evBroadcast, cmAsciiFontCursorChanged, this);
+            }
+        };
+        class TxtTemplateDialog : public TDialog {
+        public:
+            TInputLine *fileLine {nullptr};
+            TInputLine *asciiLine {nullptr};
+            AsciiFontListView *fontList {nullptr};
+            std::string fontFile;
+            std::function<std::string(const std::string &, const std::string &)> renderCb;
+
+            TxtTemplateDialog(const TRect &r, std::function<std::string(const std::string &, const std::string &)> cb) :
+                TWindowInit(&TDialog::initFrame), TDialog(r, "Nuevo archivo TXT") {
+                options |= ofCentered;
+                palette = dpBlueDialog;
+                renderCb = std::move(cb);
+            }
+
+            void syncFontFromList() {
+                if (!fontList)
+                    return;
+                NavigatorListView::NavItem it {};
+                if (!fontList->peekCursorItem(it))
+                    return;
+                fontFile = it.fullPath;
+            }
+
+            std::string buildPreviewText() {
+                if (!asciiLine)
+                    return "(vacio)";
+                syncFontFromList();
+                char buf[MAX_TITLE - 1] = {};
+                asciiLine->getData(buf);
+                const std::string ascii = trim(std::string(buf));
+                if (ascii.empty())
+                    return "(vacio)";
+                return renderCb ? renderCb(ascii, fontFile) : ascii;
+            }
+
+            void openPreviewDialog() {
+                std::string previewText = buildPreviewText();
+                TDialog *pv = new TDialog(TRect(4, 2, 108, 27), "Vista previa ASCII");
+                pv->options |= ofCentered;
+                pv->palette = dpBlueDialog;
+                pv->insert(new AsciiPreviewView(TRect(3, 3, 101, 22), &previewText));
+                pv->insert(new TButton(TRect(44, 23, 60, 25), "Cerrar", cmOK, bfDefault));
+                TProgram::deskTop->execView(pv);
+                destroy(pv);
+            }
+
+            void handleEvent(TEvent &event) override {
+                TDialog::handleEvent(event);
+                if (event.what == evCommand && event.message.command == cmAsciiOpenPreview) {
+                    openPreviewDialog();
+                    clearEvent(event);
+                }
+            }
+        };
+#pragma pack(push, 1)
+        struct Data {
+            char fileName[MAX_TITLE - 1];
+            char asciiText[MAX_TITLE - 1];
+        } data = {};
+#pragma pack(pop)
+        outFileName.clear();
+        outAsciiText.clear();
+        outFontFile.clear();
+        const auto fonts = asciiFontItems();
+        if (fonts.empty()) {
+            messageBox(mfError | mfOKButton, "No hay fuentes en ascii_fonts/. Agrega .flf/.tlf/.txt.");
+            return false;
+        }
+        TxtTemplateDialog *d = new TxtTemplateDialog(
+            TRect(10, 4, 98, 21), [this](const std::string &t, const std::string &f) { return renderAsciiWithFontFile(t, f); });
+        d->fileLine = new TInputLine(TRect(3, 4, 34, 5), MAX_TITLE - 2);
+        d->insert(d->fileLine);
+        d->insert(new TLabel(TRect(3, 3, 30, 4), "Nombre del archivo (.txt)", d->fileLine));
+        d->asciiLine = new TInputLine(TRect(36, 4, 84, 5), MAX_TITLE - 2);
+        d->insert(d->asciiLine);
+        d->insert(new TLabel(TRect(36, 3, 84, 4), "Texto ASCII (opcional)", d->asciiLine));
+        d->fontList = new AsciiFontListView(TRect(3, 8, 34, 12), &textColor, &backColor);
+        d->fontList->setItems(fonts);
+        d->insert(d->fontList);
+        d->insert(new TLabel(TRect(3, 7, 30, 8), "Fuentes ASCII (4 visibles)", d->fontList));
+        d->insert(new TButton(TRect(40, 10, 62, 12), "Ver vista previa", cmAsciiOpenPreview, bfNormal));
+        d->insert(new TButton(TRect(50, 15, 62, 17), "Aceptar", cmOK, bfDefault));
+        d->insert(new TButton(TRect(64, 15, 76, 17), "Cancelar", cmCancel, bfNormal));
+        d->setCurrent(d->fontList, normalSelect);
+        data.fileName[0] = '\0';
+        data.asciiText[0] = '\0';
+        d->setData(&data);
+        ushort res = TProgram::deskTop->execView(d);
+        if (res != cmCancel)
+            d->getData(&data);
+        const std::string pickedFont = d->fontFile;
+        destroy(d);
+        if (res != cmOK)
+            return false;
+        outFileName = trim(std::string(data.fileName));
+        outAsciiText = trim(std::string(data.asciiText));
+        outFontFile = pickedFont;
+        return !outFileName.empty();
+    }
+
     void onCreateTxtFileInBrowser() {
-        std::string name;
-        if (!promptTitle("Nuevo archivo", "Nombre del archivo (.txt)", name)) return;
+        std::string name, asciiSeed;
+        std::string asciiFontFile;
+        if (!promptTxtTemplate(name, asciiSeed, asciiFontFile)) return;
         name = trim(name);
         if (name.empty() || name == "." || name == "..") return;
         if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) return;
@@ -6089,6 +6807,10 @@ private:
         if (!f) {
             messageBox(mfError | mfOKButton, "No se pudo crear el archivo: %s", strerror(errno));
             return;
+        }
+        if (!asciiSeed.empty()) {
+            const std::string asciiTitle = renderAsciiWithFontFile(asciiSeed, asciiFontFile);
+            f << asciiTitle << "\n\n";
         }
         f.close();
         const std::string absPath = absolutePath(path);
@@ -6135,44 +6857,6 @@ private:
     }
 
 
-    void showWelcomeDialog() {
-        const int dlgL = 6, dlgT = 2, dlgR = 78, dlgB = 26;
-        const int dlgW = dlgR - dlgL;
-        const int artW = 46;
-        const int artLines = 14;
-        const int inset = 2;
-        const int buttonRow = 21;
-        const int innerW = dlgW - 2 * inset;
-        const int x0 = inset + (innerW - artW) / 2;
-        const int textAreaH = buttonRow - inset;
-        const int y0 = inset + (textAreaH - artLines) / 2;
-        const int pad = 1;
-        const int bx = std::max(1, x0 - pad);
-        const int by = std::max(1, y0 - pad);
-        const int br = std::min((int)dlgW - inset, x0 + artW + pad);
-        const int bb = y0 + artLines;
-        TDialog *d = new WelcomeDialog(TRect(dlgL, dlgT, dlgR, dlgB), "RetroWriter Desktop");
-        d->options |= ofCentered;
-        d->insert(new RainbowBannerView(TRect((short)bx, (short)by, (short)br, (short)bb), welcomeBannerLines(), &backColor,
-                                        &textColor));
-        const int bw = 14;
-        const int gap = 4;
-        const int btnBarW = 2 * bw + gap;
-        const int bx0 = inset + (innerW - btnBarW) / 2;
-        d->insert(new CleanButton(TRect(bx0, buttonRow, bx0 + bw, buttonRow + 2), "Entrar", cmOK, true));
-        d->insert(new CleanButton(TRect(bx0 + bw + gap, buttonRow, bx0 + 2 * bw + gap, buttonRow + 2), "Salir", cmCancel, false));
-        TColorAttr prevShadowAttr = shadowAttr;
-        shadowAttr = TColorAttr(0x00);
-        ushort res = deskTop->execView(d);
-        shadowAttr = prevShadowAttr;
-        destroy(d);
-        if (res == cmCancel) {
-            endModal(cmQuit);
-        } else {
-            restoreMainWorkspaceAfterModal();
-        }
-    }
-
     void showPreferencesDialog() {
         loadAppearancePreferences();
         AppearanceDialog *d = new AppearanceDialog(TRect(2, 2, 88, 20), textColor, backColor,
@@ -6214,6 +6898,455 @@ private:
             TScreen::flushScreen();
         }
         destroy(d);
+    }
+
+    bool saveIaConfigToDisk(const rw_ia::Config &cfg, std::string &err) {
+        err.clear();
+        std::ofstream o(iaWriterCfgPath, std::ios::trunc | std::ios::binary);
+        if (!o) {
+            err = "No se pudo escribir ia_writer.cfg";
+            return false;
+        }
+        o << "v1\n";
+        if (!trim(cfg.endpoint).empty())
+            o << "endpoint " << trim(cfg.endpoint) << "\n";
+        if (!trim(cfg.endpoint2).empty())
+            o << "endpoint2 " << trim(cfg.endpoint2) << "\n";
+        if (!trim(cfg.endpoint3).empty())
+            o << "endpoint3 " << trim(cfg.endpoint3) << "\n";
+        if (!trim(cfg.feedbackEndpoint).empty())
+            o << "feedback_endpoint " << trim(cfg.feedbackEndpoint) << "\n";
+        if (!trim(cfg.feedbackEndpoint2).empty())
+            o << "feedback_endpoint2 " << trim(cfg.feedbackEndpoint2) << "\n";
+        if (!trim(cfg.openaiModel).empty())
+            o << "openai_model " << trim(cfg.openaiModel) << "\n";
+        if (!trim(cfg.openaiApiKey).empty())
+            o << "openai_key " << trim(cfg.openaiApiKey) << "\n";
+        o << "timeout_sec " << std::max(5, cfg.timeoutSec) << "\n";
+        return true;
+    }
+
+    void showIaConfigDialog() {
+        ensureIaConfig();
+        TDialog *d = new TDialog(TRect(4, 2, 98, 26), "Configurar IA");
+        d->options |= ofCentered;
+        d->palette = dpBlueDialog;
+
+        char endpointBuf[380] = {};
+        char endpoint2Buf[380] = {};
+        char endpoint3Buf[380] = {};
+        char feedbackBuf[380] = {};
+        char feedback2Buf[380] = {};
+        char modelBuf[64] = {};
+        char keyBuf[220] = {};
+        char timeoutBuf[16] = {};
+
+        std::snprintf(endpointBuf, sizeof endpointBuf, "%s", iaConfig.endpoint.c_str());
+        std::snprintf(endpoint2Buf, sizeof endpoint2Buf, "%s", iaConfig.endpoint2.c_str());
+        std::snprintf(endpoint3Buf, sizeof endpoint3Buf, "%s", iaConfig.endpoint3.c_str());
+        std::snprintf(feedbackBuf, sizeof feedbackBuf, "%s", iaConfig.feedbackEndpoint.c_str());
+        std::snprintf(feedback2Buf, sizeof feedback2Buf, "%s", iaConfig.feedbackEndpoint2.c_str());
+        std::snprintf(modelBuf, sizeof modelBuf, "%s", iaConfig.openaiModel.c_str());
+        std::snprintf(keyBuf, sizeof keyBuf, "%s", iaConfig.openaiApiKey.c_str());
+        std::snprintf(timeoutBuf, sizeof timeoutBuf, "%d", std::max(5, iaConfig.timeoutSec));
+
+        d->insert(new TStaticText(TRect(3, 2, 56, 3), "Endpoint idea #1 (fallback ordenado)"));
+        TInputLine *endpointIn = new TInputLine(TRect(3, 3, 92, 4), sizeof endpointBuf - 1);
+        endpointIn->setData(endpointBuf);
+        d->insert(endpointIn);
+
+        d->insert(new TStaticText(TRect(3, 5, 56, 6), "Endpoint idea #2 (opcional)"));
+        TInputLine *endpoint2In = new TInputLine(TRect(3, 6, 92, 7), sizeof endpoint2Buf - 1);
+        endpoint2In->setData(endpoint2Buf);
+        d->insert(endpoint2In);
+
+        d->insert(new TStaticText(TRect(3, 8, 56, 9), "Endpoint idea #3 (opcional)"));
+        TInputLine *endpoint3In = new TInputLine(TRect(3, 9, 92, 10), sizeof endpoint3Buf - 1);
+        endpoint3In->setData(endpoint3Buf);
+        d->insert(endpoint3In);
+
+        d->insert(new TStaticText(TRect(3, 11, 56, 12), "Endpoint feedback #1"));
+        TInputLine *feedbackIn = new TInputLine(TRect(3, 12, 92, 13), sizeof feedbackBuf - 1);
+        feedbackIn->setData(feedbackBuf);
+        d->insert(feedbackIn);
+
+        d->insert(new TStaticText(TRect(3, 14, 56, 15), "Endpoint feedback #2 (opcional)"));
+        TInputLine *feedback2In = new TInputLine(TRect(3, 15, 92, 16), sizeof feedback2Buf - 1);
+        feedback2In->setData(feedback2Buf);
+        d->insert(feedback2In);
+
+        d->insert(new TStaticText(TRect(3, 17, 30, 18), "Modelo OpenAI"));
+        TInputLine *modelIn = new TInputLine(TRect(3, 18, 34, 19), sizeof modelBuf - 1);
+        modelIn->setData(modelBuf);
+        d->insert(modelIn);
+
+        d->insert(new TStaticText(TRect(36, 17, 58, 18), "Timeout (seg)"));
+        TInputLine *timeoutIn = new TInputLine(TRect(36, 18, 52, 19), sizeof timeoutBuf - 1);
+        timeoutIn->setData(timeoutBuf);
+        d->insert(timeoutIn);
+
+        d->insert(new TStaticText(TRect(3, 20, 30, 21), "OpenAI API key"));
+        TInputLine *keyIn = new TInputLine(TRect(3, 21, 92, 22), sizeof keyBuf - 1);
+        keyIn->setData(keyBuf);
+        d->insert(keyIn);
+
+        d->insert(new TStaticText(TRect(3, 23, 92, 24),
+                                  "Orden: endpoint #1 -> #2 -> #3 -> OpenAI. Guardar crea/actualiza ia_writer.cfg."));
+
+        d->insert(new TButton(TRect(58, 17, 74, 19), "Guardar", cmOK, bfDefault));
+        d->insert(new TButton(TRect(76, 17, 92, 19), "Cancelar", cmCancel, bfNormal));
+
+        ushort res = deskTop->execView(d);
+        if (res == cmOK) {
+            endpointIn->getData(endpointBuf);
+            endpoint2In->getData(endpoint2Buf);
+            endpoint3In->getData(endpoint3Buf);
+            feedbackIn->getData(feedbackBuf);
+            feedback2In->getData(feedback2Buf);
+            modelIn->getData(modelBuf);
+            keyIn->getData(keyBuf);
+            timeoutIn->getData(timeoutBuf);
+
+            rw_ia::Config next = iaConfig;
+            next.endpoint = trim(std::string(endpointBuf));
+            next.endpoint2 = trim(std::string(endpoint2Buf));
+            next.endpoint3 = trim(std::string(endpoint3Buf));
+            next.feedbackEndpoint = trim(std::string(feedbackBuf));
+            next.feedbackEndpoint2 = trim(std::string(feedback2Buf));
+            next.openaiModel = trim(std::string(modelBuf));
+            next.openaiApiKey = trim(std::string(keyBuf));
+            next.timeoutSec = std::max(5, std::atoi(trim(std::string(timeoutBuf)).c_str()));
+
+            std::string err;
+            if (!saveIaConfigToDisk(next, err))
+                messageBox(mfError | mfOKButton, "%s", err.c_str());
+            else {
+                iaConfig = next;
+                iaConfigLoaded = true;
+                messageBox(mfInformation | mfOKButton, "Configuracion IA guardada en:\n%s", iaWriterCfgPath.c_str());
+            }
+        }
+        destroy(d);
+    }
+
+    void ensureIaConfig() {
+        if (iaConfigLoaded)
+            return;
+        rw_ia::loadConfig(iaWriterCfgPath, iaConfig);
+        iaConfigLoaded = true;
+    }
+
+    bool appendIaRequestLogJsonl(const std::string &line) {
+        std::ofstream o(iaRequestsPath, std::ios::app | std::ios::binary);
+        if (!o) return false;
+        o << line << "\n";
+        return true;
+    }
+
+    bool commitIaProyecto(const std::string &baseDirAbs, const std::string &name, const std::string &ideaText, int modeIndex,
+                          int deadlineDays,
+                         std::string &err) {
+        err.clear();
+        std::string base = trim(baseDirAbs);
+        if (base.empty())
+            base = browserDir;
+        base = absolutePath(base);
+        std::error_code ec;
+        if (!fs::is_directory(fs::path(base), ec)) {
+            err = "Ubicación no existe o no es carpeta";
+            return false;
+        }
+        std::string n = trim(name);
+        if (n.empty() || n == "." || n == "..") {
+            err = "Nombre de carpeta invalido";
+            return false;
+        }
+        if (n.find('/') != std::string::npos || n.find('\\') != std::string::npos) {
+            err = "Sin separadores en el nombre";
+            return false;
+        }
+        std::string path = joinPath(base, n);
+        if (mkdir(path.c_str(), 0755) != 0 && errno != EEXIST) {
+            err = strerror(errno);
+            return false;
+        }
+        const std::string ap = joinPath(path, "assets");
+        if (mkdir(ap.c_str(), 0755) != 0 && errno != EEXIST) {
+            err = strerror(errno);
+            return false;
+        }
+        const std::string chapterDir = joinPath(path, "1");
+        if (mkdir(chapterDir.c_str(), 0755) != 0 && errno != EEXIST) {
+            err = strerror(errno);
+            return false;
+        }
+        const std::string chapterFile = joinPath(chapterDir, "1.txt");
+        std::ofstream ch(chapterFile, std::ios::binary | std::ios::app);
+        if (!ch) {
+            err = "No se pudo crear 1/1.txt";
+            return false;
+        }
+        const std::string premisaPath = joinPath(path, "premisa.txt");
+        std::ofstream f(premisaPath, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            err = "No se pudo crear premisa.txt";
+            return false;
+        }
+        static const char *kModo[] = {"frases", "diez_palabras", "cinco_palabras"};
+        const int mi = std::clamp(modeIndex, 0, 2);
+        const char *mt = kModo[mi];
+        const std::string due = rw_ia::deadlineIsoFromDays(deadlineDays);
+        std::time_t tnow = std::time(nullptr);
+        struct tm tmb {};
+        localtime_r(&tnow, &tmb);
+        char cbuf[64];
+        std::strftime(cbuf, sizeof cbuf, "%Y-%m-%dT%H:%M:%S", &tmb);
+
+        f << "# RetroWriter - Crear con IA\n# modo " << mt << "\n# creado " << cbuf << "\n# entrega sugerida " << due
+          << "\n\n"
+          << ideaText << "\n";
+        f.close();
+
+        rw_ia::Assignment a;
+        a.id = std::to_string((long)tnow) + "_" + std::to_string(std::rand() & 0xFFFFFF);
+        a.novelRootAbs = absolutePath(path);
+        a.premisaAbs = absolutePath(premisaPath);
+        a.createdIso = cbuf;
+        a.deadlineIso = due;
+        a.estado = "pendiente";
+        a.modo = mt;
+        if (!rw_ia::appendJsonl(iaRegistryPath, a)) {
+            err = "No se pudo escribir ia_escrituras.jsonl";
+            return false;
+        }
+        browserDir = absolutePath(path);
+        syncFilePanelListing();
+        saveWorkspaceSession();
+        return true;
+    }
+
+    void showCrearConIADialog() {
+        ensureIaConfig();
+        CrearConIADialog *d = new CrearConIADialog(TRect(2, 1, 76, 26), this, browserDir, "");
+        TView *v = validView(d);
+        if (!v) {
+            destroy(d);
+            return;
+        }
+        ushort res = deskTop->execView(v);
+        ushort modeIdx = 999;
+        char baseDirRaw[MAXPATH] = {};
+        char folderRaw[MAX_TITLE - 1] = {};
+        char ideaCopy[500] = {};
+        int iaDaysFromModel = 0;
+        if (res == cmOK) {
+            auto *cd = static_cast<CrearConIADialog *>(v);
+            if (cd->selectedMode >= 0)
+                modeIdx = (ushort)cd->selectedMode;
+            std::snprintf(baseDirRaw, sizeof baseDirRaw, "%s", cd->baseDirData);
+            cd->folderLine->getData(folderRaw);
+            std::memcpy(ideaCopy, cd->ideaData, sizeof ideaCopy);
+            iaDaysFromModel = cd->iaDeadlineDays;
+        }
+        destroy(v);
+        if (res != cmOK)
+            return;
+        const std::string baseDir = trim(std::string(baseDirRaw));
+        const std::string folderName = trim(std::string(folderRaw));
+        const std::string ideaText = trim(std::string(ideaCopy));
+        if (modeIdx > 5) {
+            messageBox(mfError | mfOKButton, "Primero pulsa Solicitar para obtener una idea IA.");
+            return;
+        }
+        if (baseDir.empty() || folderName.empty() || ideaText.empty()) {
+            messageBox(mfError | mfOKButton, "Completa ubicación, carpeta e idea (usa Solicitar si hace falta).");
+            return;
+        }
+        const int ddays =
+            (iaDaysFromModel >= 1 && iaDaysFromModel <= 7) ? iaDaysFromModel : rw_ia::randomDeadlineDays();
+        std::string err;
+        if (!commitIaProyecto(baseDir, folderName, ideaText, (int)modeIdx, ddays, err)) {
+            messageBox(mfError | mfOKButton, "%s", err.c_str());
+            return;
+        }
+        char msg[320];
+        if (ddays == 1) {
+            std::snprintf(msg, sizeof msg,
+                          "Listo: carpeta, premisa.txt y registro. Entrega sugerida en 1 día (ver ia_escrituras.jsonl).");
+        } else {
+            std::snprintf(msg, sizeof msg,
+                          "Listo: carpeta, premisa.txt y registro. Entrega sugerida en %d días (ver ia_escrituras.jsonl).",
+                          ddays);
+        }
+        messageBox(mfInformation | mfOKButton, "%s", msg);
+    }
+
+    void showEntregarIADialog() {
+        ensureIaConfig();
+        auto pend = rw_ia::loadPending(iaRegistryPath);
+        if (pend.empty()) {
+            messageBox(mfInformation | mfOKButton, "No hay escrituras IA pendientes.");
+            return;
+        }
+        const int n = (int)std::min(pend.size(), size_t(12));
+        TSItem *chain = nullptr;
+        for (int i = n - 1; i >= 0; --i) {
+            const std::string lab = std::to_string(i + 1) + ") " + pathTitleForWidth(pend[(size_t)i].novelRootAbs, 42);
+            chain = new TSItem(lab.c_str(), chain);
+        }
+        const short rbBot = (short)(3 + std::max(3, n));
+        TDialog *dlg = new TDialog(TRect(2, 2, 76, (short)(rbBot + 6)), "Entregar escritura IA");
+        dlg->options |= ofCentered;
+        dlg->palette = dpBlueDialog;
+        auto *rb = new TRadioButtons(TRect(3, 3, 72, rbBot), chain);
+        dlg->insert(rb);
+        ushort z = 0;
+        rb->setData(&z);
+        dlg->insert(new TButton(TRect(3, (short)(rbBot + 1), 26, (short)(rbBot + 3)), "Entregar", cmOK, bfDefault));
+        dlg->insert(
+            new TButton(TRect(28, (short)(rbBot + 1), 50, (short)(rbBot + 3)), "Comentario IA", cmIaPedirComentario, bfNormal));
+        dlg->insert(new TButton(TRect(52, (short)(rbBot + 1), 70, (short)(rbBot + 3)), "Cerrar", cmCancel, bfNormal));
+        TView *v2 = validView(dlg);
+        if (!v2) {
+            destroy(dlg);
+            return;
+        }
+        ushort cmd = deskTop->execView(v2);
+        ushort sel = 0;
+        if (cmd == cmOK || cmd == cmIaPedirComentario)
+            rb->getData(&sel);
+        destroy(v2);
+        if (cmd == cmCancel)
+            return;
+        if (sel >= (ushort)n)
+            return;
+        const rw_ia::Assignment &pick = pend[sel];
+
+        if (cmd == cmIaPedirComentario) {
+            ensureIaConfig();
+            std::ifstream pf(pick.premisaAbs);
+            std::string txt((std::istreambuf_iterator<char>(pf)), std::istreambuf_iterator<char>());
+            if (txt.empty()) {
+                messageBox(mfError | mfOKButton, "premisa.txt vacio o no legible.");
+                return;
+            }
+            const std::string body = std::string("{\"accion\":\"comentario\",\"archivo\":\"") +
+                                     rw_ia::jsonEscapeString(pick.premisaAbs) + std::string("\",\"texto\":\"") +
+                                     rw_ia::jsonEscapeString(txt) + "\"}";
+            std::string reply, err;
+            if (!rw_ia::fetchFeedback(iaConfig, body, reply, err)) {
+                messageBox(mfError | mfOKButton, "Comentario IA: %s", err.c_str());
+                return;
+            }
+            messageBox(mfInformation | mfOKButton, "%s", reply.c_str());
+            return;
+        }
+
+        std::time_t tnow = std::time(nullptr);
+        struct tm tmb {};
+        localtime_r(&tnow, &tmb);
+        char nowBuf[64];
+        std::strftime(nowBuf, sizeof nowBuf, "%Y-%m-%dT%H:%M:%S", &tmb);
+        const bool onTime = (std::string(nowBuf) <= pick.deadlineIso);
+        if (!rw_ia::markDelivered(iaRegistryPath, pick.id, onTime)) {
+            messageBox(mfError | mfOKButton, "No se pudo actualizar el registro.");
+            return;
+        }
+        messageBox(mfInformation | mfOKButton, onTime ? "Entregada a tiempo." : "Entregada fuera de plazo.");
+    }
+
+    void showIaResumenDialog() {
+        auto all = rw_ia::loadAll(iaRegistryPath);
+        if (all.empty()) {
+            messageBox(mfInformation | mfOKButton, "No hay registros en ia_escrituras.jsonl.");
+            return;
+        }
+
+        auto parseIso = [](const std::string &iso, std::tm &out) -> bool {
+            std::memset(&out, 0, sizeof out);
+            int Y = 0, M = 0, D = 0, h = 0, m = 0, s = 0;
+            if (std::sscanf(iso.c_str(), "%d-%d-%dT%d:%d:%d", &Y, &M, &D, &h, &m, &s) != 6)
+                return false;
+            out.tm_year = Y - 1900;
+            out.tm_mon = M - 1;
+            out.tm_mday = D;
+            out.tm_hour = h;
+            out.tm_min = m;
+            out.tm_sec = s;
+            out.tm_isdst = -1;
+            return true;
+        };
+
+        auto dayDiffFromNow = [&](const std::string &deadlineIso) -> int {
+            std::tm dl {};
+            if (!parseIso(deadlineIso, dl))
+                return 0;
+            const std::time_t tdl = std::mktime(&dl);
+            const std::time_t tnow = std::time(nullptr);
+            const double diff = std::difftime(tdl, tnow);
+            const double absDays = std::fabs(diff) / 86400.0;
+            const int days = (int)std::ceil(absDays);
+            return diff >= 0 ? days : -days;
+        };
+
+        std::vector<std::string> pendientes;
+        std::vector<std::string> vencidasPend;
+        std::vector<std::string> completasTiempo;
+        std::vector<std::string> completasTarde;
+
+        for (const auto &a : all) {
+            std::string title = pathTitleForWidth(a.novelRootAbs, 40);
+            if (a.estado == "pendiente") {
+                const int dd = dayDiffFromNow(a.deadlineIso);
+                if (dd >= 0) {
+                    if (dd == 0)
+                        pendientes.push_back(title + " (vence hoy)");
+                    else if (dd == 1)
+                        pendientes.push_back(title + " (falta 1 dia)");
+                    else
+                        pendientes.push_back(title + " (faltan " + std::to_string(dd) + " dias)");
+                } else {
+                    const int ov = -dd;
+                    if (ov == 1)
+                        vencidasPend.push_back(title + " (vencida hace 1 dia)");
+                    else
+                        vencidasPend.push_back(title + " (vencida hace " + std::to_string(ov) + " dias)");
+                }
+            } else if (a.estado == "entregada") {
+                completasTiempo.push_back(title);
+            } else if (a.estado == "entregada_tarde") {
+                completasTarde.push_back(title);
+            }
+        }
+
+        auto appendSection = [](std::string &txt, const char *name, const std::vector<std::string> &items) {
+            txt += std::string(name) + " (" + std::to_string(items.size()) + ")\n";
+            const int showN = std::min((int)items.size(), 8);
+            for (int i = 0; i < showN; ++i)
+                txt += " - " + items[(size_t)i] + "\n";
+            if ((int)items.size() > showN)
+                txt += " - ... +" + std::to_string((int)items.size() - showN) + " mas\n";
+            txt += "\n";
+        };
+
+        std::string report;
+        appendSection(report, "Pendientes", pendientes);
+        appendSection(report, "Vencidas (aun entregables)", vencidasPend);
+        appendSection(report, "Completadas a tiempo", completasTiempo);
+        appendSection(report, "Completadas tarde", completasTarde);
+
+        TDialog *d = new TDialog(TRect(2, 1, 98, 29), "Resumen de escrituras IA");
+        d->options |= ofCentered;
+        d->palette = dpBlueDialog;
+        d->insert(new TStaticText(TRect(3, 2, 94, 25), report.c_str()));
+        d->insert(new TButton(TRect(40, 25, 58, 27), "Cerrar", cmCancel, bfDefault));
+        TView *v = validView(d);
+        if (!v) {
+            destroy(d);
+            return;
+        }
+        deskTop->execView(v);
+        destroy(v);
     }
 
     void refreshNavigatorWidget() {
@@ -6274,7 +7407,7 @@ private:
 
         if (filePanelVisible) {
             const int navW = navR.b.x - navR.a.x;
-            std::string navWinTitle = pathTitleForWidth(browserDir, navW - 2);
+            std::string navWinTitle = pathTitleForWidth(browserDir, std::max(1, navW - 10));
             TWindow *nw = new TWindow(navR, navWinTitle.c_str(), wnNoNumber);
             nw->flags &= ~wfZoom;
             nw->flags &= ~wfClose;
@@ -6282,7 +7415,7 @@ private:
             nw->eventMask |= evBroadcast;
             const short winRx = short(navR.b.x - navR.a.x - 1);
             const short winBy = short(navR.b.y - navR.a.y - 1);
-            navListView = new NavigatorListView(TRect(1, 1, winRx, short(winBy - 2)), &textColor, &backColor);
+            navListView = new MainPanelNavigatorListView(TRect(1, 1, winRx, short(winBy - 2)), &textColor, &backColor);
             navListView->setItems(buildFileManagerItems());
             nw->insert(navListView);
             nw->insert(new FolderPanelFooterStrip(TRect(1, winBy - 2, winRx, winBy)));
