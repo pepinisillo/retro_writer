@@ -23,6 +23,8 @@ def main() -> int:
         os.chdir(font_dir)
         fig = Figlet(font=font_name)
         out = fig.renderText(args.text)
+        # TUI safety: conservar solo LF + ASCII imprimible; CR puede "pisar" columna 0 en algunos editores TUI.
+        out = "".join(ch if (ch == "\n" or 32 <= ord(ch) < 127) else "#" for ch in out)
     finally:
         os.chdir(old_cwd)
     sys.stdout.write(out)

@@ -111,6 +111,8 @@ const int cmCreateFolder = 1015;
 const int cmCreateTxtFile = 1017;
 const int cmAsciiFontCursorChanged = 1038;
 const int cmAsciiOpenPreview = 1039;
+const int cmNavFilePopup = 1040;
+const int cmNavMoveTrash = 1041;
 /** Base de comandos para popupMenu de ids de personaje (rwPickCharacterIdFromList). */
 const int cmPickCharPopupBase = 12000;
 const int cmReadabilityHelp = 1022;
@@ -2497,6 +2499,16 @@ public:
     MainPanelNavigatorListView(const TRect &bounds, const ushort *themeText, const ushort *themeBack) noexcept :
         NavigatorListView(bounds, themeText, themeBack) {}
 
+    void handleEvent(TEvent &event) override {
+        const bool rightClick = (event.what == evMouseDown) && ((event.mouse.buttons & mbRightButton) != 0);
+        NavigatorListView::handleEvent(event);
+        if (!rightClick || !TProgram::application)
+            return;
+        NavItem it {};
+        if (peekCursorItem(it) && !it.isDirectory && it.label != "..")
+            message(TProgram::application, evBroadcast, cmNavFilePopup, this);
+    }
+
     void changeBounds(const TRect &bounds) override {
         const short pw = size.x;
         const short ph = size.y;
@@ -3858,6 +3870,10 @@ public:
         eventMask |= evMouseWheel;
     }
 
+    void requestInitialViewportReset() {
+        pendingInitialViewportReset = true;
+    }
+
     struct UndoSnapshot {
         std::string text;
         uint curPtr {0};
@@ -4096,6 +4112,8 @@ public:
         const int oldDy = delta.y;
         const int oldDx = delta.x;
         TFileEditor::handleEvent(event);
+        if (delta.x != 0)
+            scrollTo(0, delta.y);
         if (!restoringSnapshot && mayModify) {
             std::string after = makeSnapshotText();
             if (after != before.text) {
@@ -4129,12 +4147,20 @@ public:
                 hScrollBar->hide();
             if (vScrollBar)
                 vScrollBar->hide();
+            if (delta.x != 0)
+                scrollTo(0, delta.y);
+            if (enable && pendingInitialViewportReset) {
+                scrollTo(0, 0);
+                pendingInitialViewportReset = false;
+                drawView();
+            }
         }
     }
 
 private:
     std::vector<UndoSnapshot> undoSnapshots;
     bool restoringSnapshot {false};
+    bool pendingInitialViewportReset {true};
 };
 
 /** Marco del editor con borde simple siempre (activo/inactivo), manteniendo eventos normales de TFrame. */
@@ -4711,6 +4737,38 @@ public:
         if (event.what == evBroadcast && event.message.command == cmNavSelect) {
             auto *src = static_cast<NavigatorListView *>(event.message.infoPtr);
             fileManagerActivate(src);
+            clearEvent(event);
+            return;
+        }
+        if (event.what == evBroadcast && event.message.command == cmNavFilePopup) {
+            auto *src = static_cast<NavigatorListView *>(event.message.infoPtr);
+            if (src && src == navListView) {
+                NavigatorListView::NavItem it {};
+                if (src->peekCursorItem(it) && !it.isDirectory && it.label != "..") {
+                    TDeskTop *desk = deskTop;
+                    if (desk) {
+                        TPoint p = navWindow ? navWindow->makeGlobal(TPoint{3, 3}) : TPoint{3, 3};
+                        TMenuItem *chain = new TMenuItem("Mover a ~t~rash", cmNavMoveTrash, TKey(), hcNoContext, 0);
+                        TRect bounds(p, p);
+                        TMenu *menu = new TMenu(*chain);
+                        TMenuPopup *popup = new TMenuPopup(bounds, menu);
+                        rwAutoPlaceMenuPopupOnDesk(desk, popup, p);
+                        const ushort cmd = desk->execView(popup);
+                        TObject::destroy(popup);
+                        if (cmd == cmNavMoveTrash) {
+                            const ushort ans = messageBox(mfConfirmation | mfYesButton | mfNoButton,
+                                                          "Mover a trash?\n%s", it.label.c_str());
+                            if (ans == cmYes) {
+                                std::string err;
+                                if (!movePathToTrash(it.fullPath, err))
+                                    messageBox(mfError | mfOKButton, "%s", err.c_str());
+                                else
+                                    syncFilePanelListing();
+                            }
+                        }
+                    }
+                }
+            }
             clearEvent(event);
             return;
         }
@@ -6494,6 +6552,13 @@ private:
         /* Tras ensureEditorAboveNavigator el foco puede quedar en el panel; aquí se fuerza el editor. */
         if (deskTop && editorWindow)
             deskTop->setCurrent(editorWindow, normalSelect);
+        /* Al abrir archivo nuevo/largo, asegurar vista desde columna 0 (evita "recorte" visual inicial). */
+        if (editorWindow && editorWindow->editor) {
+            if (auto *re = dynamic_cast<RetroFileEditor *>(editorWindow->editor))
+                re->requestInitialViewportReset();
+            editorWindow->editor->scrollTo(0, 0);
+            editorWindow->editor->drawView();
+        }
         lastEditorPath = std::move(absPath);
         saveWorkspaceSession();
         updateMiniPreviewWindowTitles();
@@ -6620,7 +6685,24 @@ private:
         const int st = pclose(fp);
         if (st != 0 || out.empty())
             return t;
-        return out;
+        std::string normalized;
+        normalized.reserve(out.size() + 64);
+        size_t p = 0;
+        while (p <= out.size()) {
+            size_t q = out.find('\n', p);
+            const bool hasLf = (q != std::string::npos);
+            if (!hasLf)
+                q = out.size();
+            std::string line = out.substr(p, q - p);
+            line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+            normalized += line;
+            if (hasLf)
+                normalized.push_back('\n');
+            if (!hasLf)
+                break;
+            p = q + 1;
+        }
+        return normalized;
     }
 
     std::vector<NavigatorListView::NavItem> asciiFontItems() const {
@@ -6696,30 +6778,24 @@ private:
         public:
             TInputLine *fileLine {nullptr};
             TInputLine *asciiLine {nullptr};
-            AsciiFontListView *fontList {nullptr};
             std::string fontFile;
+            std::vector<NavigatorListView::NavItem> fonts;
             std::function<std::string(const std::string &, const std::string &)> renderCb;
 
-            TxtTemplateDialog(const TRect &r, std::function<std::string(const std::string &, const std::string &)> cb) :
+            TxtTemplateDialog(const TRect &r, const std::vector<NavigatorListView::NavItem> &fontsIn,
+                              std::function<std::string(const std::string &, const std::string &)> cb) :
                 TWindowInit(&TDialog::initFrame), TDialog(r, "Nuevo archivo TXT") {
                 options |= ofCentered;
                 palette = dpBlueDialog;
+                fonts = fontsIn;
                 renderCb = std::move(cb);
-            }
-
-            void syncFontFromList() {
-                if (!fontList)
-                    return;
-                NavigatorListView::NavItem it {};
-                if (!fontList->peekCursorItem(it))
-                    return;
-                fontFile = it.fullPath;
+                if (!fonts.empty())
+                    fontFile = fonts.front().fullPath;
             }
 
             std::string buildPreviewText() {
                 if (!asciiLine)
                     return "(vacio)";
-                syncFontFromList();
                 char buf[MAX_TITLE - 1] = {};
                 asciiLine->getData(buf);
                 const std::string ascii = trim(std::string(buf));
@@ -6728,24 +6804,91 @@ private:
                 return renderCb ? renderCb(ascii, fontFile) : ascii;
             }
 
-            void openPreviewDialog() {
-                std::string previewText = buildPreviewText();
-                TDialog *pv = new TDialog(TRect(4, 2, 108, 27), "Vista previa ASCII");
+            void openPreviewDialog(const ushort *themeText, const ushort *themeBack) {
+                class AsciiPreviewDialog : public TDialog {
+                public:
+                    AsciiFontListView *list {nullptr};
+                    AsciiPreviewView *preview {nullptr};
+                    std::string previewText;
+                    std::string selectedFont;
+                    TInputLine *asciiLine {nullptr};
+                    std::function<std::string(const std::string &, const std::string &)> renderCb;
+
+                    AsciiPreviewDialog(const TRect &r) : TWindowInit(&TDialog::initFrame), TDialog(r, "Vista previa ASCII") {
+                        options |= ofCentered;
+                        palette = dpBlueDialog;
+                    }
+
+                    void refreshPreview() {
+                        if (!list || !asciiLine)
+                            return;
+                        NavigatorListView::NavItem it {};
+                        if (list->peekCursorItem(it))
+                            selectedFont = it.fullPath;
+                        char buf[MAX_TITLE - 1] = {};
+                        asciiLine->getData(buf);
+                        const std::string ascii = trim(std::string(buf));
+                        if (ascii.empty())
+                            previewText = "(vacio)";
+                        else
+                            previewText = renderCb ? renderCb(ascii, selectedFont) : ascii;
+                        if (preview)
+                            preview->drawView();
+                        TScreen::flushScreen();
+                    }
+
+                    void handleEvent(TEvent &event) override {
+                        if (event.what == evBroadcast && event.message.command == cmAsciiFontCursorChanged) {
+                            refreshPreview();
+                            clearEvent(event);
+                            return;
+                        }
+                        TDialog::handleEvent(event);
+                    }
+                };
+
+                AsciiPreviewDialog *pv = new AsciiPreviewDialog(TRect(4, 2, 108, 27));
                 pv->options |= ofCentered;
                 pv->palette = dpBlueDialog;
-                pv->insert(new AsciiPreviewView(TRect(3, 3, 101, 22), &previewText));
-                pv->insert(new TButton(TRect(44, 23, 60, 25), "Cerrar", cmOK, bfDefault));
-                TProgram::deskTop->execView(pv);
+                pv->asciiLine = asciiLine;
+                pv->renderCb = renderCb;
+                pv->selectedFont = fontFile;
+
+                /* Arriba: lista (4 visibles). Abajo: preview a todo el ancho. */
+                pv->list = new AsciiFontListView(TRect(3, 3, 101, 7), themeText, themeBack);
+                pv->list->setItems(fonts);
+                pv->insert(pv->list);
+                pv->insert(new TLabel(TRect(3, 2, 18, 3), "Fuentes ASCII", pv->list));
+                pv->preview = new AsciiPreviewView(TRect(3, 9, 101, 22), &pv->previewText);
+                pv->insert(pv->preview);
+                pv->insert(new TLabel(TRect(3, 8, 19, 9), "Vista previa", pv->preview));
+                pv->insert(new TButton(TRect(62, 23, 80, 25), "Usar fuente", cmOK, bfDefault));
+                pv->insert(new TButton(TRect(82, 23, 98, 25), "Cancelar", cmCancel, bfNormal));
+
+                for (size_t i = 0; i < fonts.size(); ++i) {
+                    if (fonts[i].fullPath == fontFile) {
+                        pv->list->setCursorByLabel(fonts[i].label);
+                        break;
+                    }
+                }
+                pv->refreshPreview();
+                pv->setCurrent(pv->list, normalSelect);
+                const ushort res = TProgram::deskTop->execView(pv);
+                if (res == cmOK)
+                    fontFile = pv->selectedFont;
                 destroy(pv);
             }
 
             void handleEvent(TEvent &event) override {
                 TDialog::handleEvent(event);
                 if (event.what == evCommand && event.message.command == cmAsciiOpenPreview) {
-                    openPreviewDialog();
+                    openPreviewDialog(themeTextRef, themeBackRef);
                     clearEvent(event);
                 }
             }
+
+            const ushort *themeTextRef {nullptr};
+            const ushort *themeBackRef {nullptr};
         };
 #pragma pack(push, 1)
         struct Data {
@@ -6762,33 +6905,37 @@ private:
             return false;
         }
         TxtTemplateDialog *d = new TxtTemplateDialog(
-            TRect(10, 4, 98, 21), [this](const std::string &t, const std::string &f) { return renderAsciiWithFontFile(t, f); });
-        d->fileLine = new TInputLine(TRect(3, 4, 34, 5), MAX_TITLE - 2);
+            TRect(14, 5, 94, 12), fonts, [this](const std::string &t, const std::string &f) { return renderAsciiWithFontFile(t, f); });
+        d->fileLine = new TInputLine(TRect(3, 3, 34, 4), MAX_TITLE - 2);
         d->insert(d->fileLine);
-        d->insert(new TLabel(TRect(3, 3, 30, 4), "Nombre del archivo (.txt)", d->fileLine));
-        d->asciiLine = new TInputLine(TRect(36, 4, 84, 5), MAX_TITLE - 2);
+        d->insert(new TLabel(TRect(3, 2, 30, 3), "Nombre del archivo (.txt)", d->fileLine));
+        d->asciiLine = new TInputLine(TRect(36, 3, 76, 4), MAX_TITLE - 2);
         d->insert(d->asciiLine);
-        d->insert(new TLabel(TRect(36, 3, 84, 4), "Texto ASCII (opcional)", d->asciiLine));
-        d->fontList = new AsciiFontListView(TRect(3, 8, 34, 12), &textColor, &backColor);
-        d->fontList->setItems(fonts);
-        d->insert(d->fontList);
-        d->insert(new TLabel(TRect(3, 7, 30, 8), "Fuentes ASCII (4 visibles)", d->fontList));
-        d->insert(new TButton(TRect(40, 10, 62, 12), "Ver vista previa", cmAsciiOpenPreview, bfNormal));
-        d->insert(new TButton(TRect(50, 15, 62, 17), "Aceptar", cmOK, bfDefault));
-        d->insert(new TButton(TRect(64, 15, 76, 17), "Cancelar", cmCancel, bfNormal));
-        d->setCurrent(d->fontList, normalSelect);
+        d->insert(new TLabel(TRect(36, 2, 76, 3), "Texto ASCII (opcional)", d->asciiLine));
+        d->insert(new TButton(TRect(24, 6, 36, 8), "preview", cmAsciiOpenPreview, bfNormal));
+        d->insert(new TButton(TRect(38, 6, 50, 8), "Aceptar", cmOK, bfDefault));
+        d->insert(new TButton(TRect(52, 6, 64, 8), "Cancelar", cmCancel, bfNormal));
+        d->themeTextRef = &textColor;
+        d->themeBackRef = &backColor;
+        d->setCurrent(d->asciiLine, normalSelect);
         data.fileName[0] = '\0';
         data.asciiText[0] = '\0';
         d->setData(&data);
         ushort res = TProgram::deskTop->execView(d);
-        if (res != cmCancel)
-            d->getData(&data);
+        char fileBuf[MAX_TITLE - 1] = {};
+        char asciiBuf[MAX_TITLE - 1] = {};
+        if (res != cmCancel) {
+            if (d->fileLine)
+                d->fileLine->getData(fileBuf);
+            if (d->asciiLine)
+                d->asciiLine->getData(asciiBuf);
+        }
         const std::string pickedFont = d->fontFile;
         destroy(d);
         if (res != cmOK)
             return false;
-        outFileName = trim(std::string(data.fileName));
-        outAsciiText = trim(std::string(data.asciiText));
+        outFileName = trim(std::string(fileBuf));
+        outAsciiText = trim(std::string(asciiBuf));
         outFontFile = pickedFont;
         return !outFileName.empty();
     }
@@ -6815,8 +6962,54 @@ private:
         f.close();
         const std::string absPath = absolutePath(path);
         openFileInEditor(absPath);
+        if (editorWindow && editorWindow->editor) {
+            if (auto *re = dynamic_cast<RetroFileEditor *>(editorWindow->editor))
+                re->requestInitialViewportReset();
+            editorWindow->editor->scrollTo(0, 0);
+            editorWindow->editor->drawView();
+            TScreen::flushScreen();
+        }
         syncFilePanelListing();
         saveWorkspaceSession();
+    }
+
+    bool movePathToTrash(const std::string &absPath, std::string &err) {
+        err.clear();
+        if (absPath.empty()) {
+            err = "Ruta vacia.";
+            return false;
+        }
+        const std::string q = shellQuote(absPath);
+        auto run = [](const std::string &cmd) -> bool { return std::system(cmd.c_str()) == 0; };
+        if (run("gio trash -- " + q + " >/dev/null 2>&1"))
+            return true;
+        if (run("kioclient5 move " + q + " trash:/ >/dev/null 2>&1"))
+            return true;
+
+        const char *home = std::getenv("HOME");
+        if (!home || !home[0]) {
+            err = "HOME no disponible.";
+            return false;
+        }
+        const fs::path trashDir = fs::path(home) / ".local/share/Trash/files";
+        std::error_code ec;
+        fs::create_directories(trashDir, ec);
+        if (ec) {
+            err = "No se pudo preparar Trash/files.";
+            return false;
+        }
+        fs::path src(absPath);
+        fs::path dst = trashDir / src.filename();
+        if (fs::exists(dst, ec))
+            dst = trashDir / (src.stem().string() + "-" + std::to_string((long long)std::time(nullptr)) + src.extension().string());
+        ec.clear();
+        fs::rename(src, dst, ec);
+        if (!ec)
+            return true;
+        if (run("mv " + q + " " + shellQuote(dst.string()) + " >/dev/null 2>&1"))
+            return true;
+        err = "No se pudo mover a trash.";
+        return false;
     }
 
     void fileManagerActivate(NavigatorListView *src) {
