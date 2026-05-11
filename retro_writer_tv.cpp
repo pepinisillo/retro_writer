@@ -4687,6 +4687,20 @@ public:
 
     virtual void idle() override {
         TProgram::idle();
+        {
+            std::time_t tt = std::time(nullptr);
+            struct tm tmNow {};
+#if defined(_WIN32)
+            localtime_s(&tmNow, &tt);
+#else
+            localtime_r(&tt, &tmNow);
+#endif
+            if (tmNow.tm_min != lastClockMinute) {
+                lastClockMinute = tmNow.tm_min;
+                if (menuBar)
+                    menuBar->drawView();
+            }
+        }
 #if !defined(_WIN32)
         if (kittyPendingZoomRestore) {
             kittyPendingZoomRestore = false;
@@ -5012,6 +5026,8 @@ private:
     int autoSaveIntervalSec {60};
     /** Si esta activo, al escribir "--" se convierte a guion largo Unicode (—). */
     bool autoEmDashFromDoubleHyphen {false};
+    /** Minuto mostrado por el reloj de la barra superior (para refrescar sin depender del foco). */
+    int lastClockMinute {-1};
     TTimerId autoSaveTimer {nullptr};
     /** Caracter literal del fondo del escritorio. */
     char desktopPatternChar {'\xb0'};
