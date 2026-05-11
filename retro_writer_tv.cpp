@@ -3912,6 +3912,85 @@ public:
     }
 
     void handleEvent(TEvent &event) override {
+        auto moveByVisualRow = [&](int dir, uchar selMode) -> bool {
+            if (dir != -1 && dir != 1)
+                return false;
+            // Ancho visible del editor en celdas. Si la línea cabe, dejamos el comportamiento normal.
+            const int wrapW = std::max<int>(1, (int)size.x);
+            const uint ls = lineStart(curPtr);
+            const uint le = lineEnd(ls);
+            const int lineCols = (int)charPos(ls, le);
+            if (lineCols < wrapW)
+                return false;
+
+            const int curCol = (int)charPos(ls, curPtr);
+            const int colInRow = curCol % wrapW;
+            const int lastRow = (lineCols > 0) ? (lineCols - 1) / wrapW : 0;
+            const int curRow = curCol / wrapW;
+
+            auto clampToLine = [&](uint start, uint end, int targetCol) -> uint {
+                const int maxCol = (int)charPos(start, end);
+                const int c = std::max(0, std::min(targetCol, maxCol));
+                return charPtr(start, c);
+            };
+
+            if (dir < 0) {
+                if (curRow > 0) {
+                    const int targetCol = curCol - wrapW;
+                    setCurPtr(clampToLine(ls, le, targetCol), selMode);
+                    return true;
+                }
+                if (ls == 0)
+                    return false;
+                const uint pls = prevLine(ls);
+                const uint ple = lineEnd(pls);
+                const int pCols = (int)charPos(pls, ple);
+                const int pLastRow = (pCols > 0) ? (pCols - 1) / wrapW : 0;
+                const int targetCol = pLastRow * wrapW + colInRow;
+                setCurPtr(clampToLine(pls, ple, targetCol), selMode);
+                return true;
+            } else {
+                if (curRow < lastRow) {
+                    const int targetCol = curCol + wrapW;
+                    setCurPtr(clampToLine(ls, le, targetCol), selMode);
+                    return true;
+                }
+                const uint nls = nextLine(ls);
+                if (nls == ls)
+                    return false;
+                const uint nle = lineEnd(nls);
+                const int targetCol = colInRow;
+                setCurPtr(clampToLine(nls, nle, targetCol), selMode);
+                return true;
+            }
+        };
+
+        if (event.what == evKeyDown) {
+            const auto &kd = event.keyDown;
+            const ushort k = ctrlToArrow(kd.keyCode);
+            if (k == kbUp || k == kbDown) {
+                const uchar selMode = ((kd.controlKeyState & kbShift) != 0) ? smExtend : 0;
+                if (moveByVisualRow(k == kbUp ? -1 : 1, selMode)) {
+                    clearEvent(event);
+                    return;
+                }
+            }
+        }
+
+        if (event.what == evCommand) {
+            if (event.message.command == cmLineUp) {
+                if (moveByVisualRow(-1, 0)) {
+                    clearEvent(event);
+                    return;
+                }
+            } else if (event.message.command == cmLineDown) {
+                if (moveByVisualRow(1, 0)) {
+                    clearEvent(event);
+                    return;
+                }
+            }
+        }
+
         if (event.what == evKeyDown) {
             /* Fallback para terminales donde Ctrl+Shift+Flecha llega igual que Ctrl+Flecha. */
             const auto &kd = event.keyDown;
