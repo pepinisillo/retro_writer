@@ -2721,6 +2721,7 @@ public:
     FolderAssetsCheckBoxes(const TRect &bounds, TSItem *strings) noexcept : TCheckBoxes(bounds, strings) {}
 
     bool wantsAssets() const noexcept { return (value & 1u) != 0; }
+    void setWantsAssets(bool enabled) noexcept { value = enabled ? 1u : 0u; }
 
     TPalette &getPalette() const override {
         static TPalette palette("\x06\x06\x06\x06\x06", 5);
@@ -2730,7 +2731,8 @@ public:
 
 class AppearanceDialog : public TDialog {
 public:
-    AppearanceDialog(TRect bounds, ushort fg, ushort bg, char pat, const std::string &patUtf8, int autoSaveSec) :
+    AppearanceDialog(TRect bounds, ushort fg, ushort bg, char pat, const std::string &patUtf8, int autoSaveSec,
+                     bool autoEmDash) :
         TWindowInit(&TDialog::initFrame),
         TDialog(bounds, "Apariencia y autoguardado") {
         options |= ofCentered;
@@ -2765,6 +2767,10 @@ public:
         autoSaveInput = new TInputLine(TRect(57, 10, 82, 11), 5);
         autoSaveInput->setData(autoSaveData);
         insert(autoSaveInput);
+        autoEmDashCb = new FolderAssetsCheckBoxes(TRect(57, 11, 82, 13),
+            new TSItem("Auto: -- -> guion largo", nullptr));
+        autoEmDashCb->setWantsAssets(autoEmDash);
+        insert(autoEmDashCb);
         insert(new TButton(TRect(56, 13, 68, 15), "Aplicar", cmOK, bfDefault));
         insert(new TButton(TRect(70, 13, 82, 15), "Cancelar", cmCancel, bfNormal));
     }
@@ -2774,6 +2780,10 @@ public:
         if (autoSaveInput)
             autoSaveInput->getData(autoSaveData);
         return parseIntClamped(trim(std::string(autoSaveData)), 0, 7200, 60);
+    }
+
+    bool takeAutoEmDashEnabled() const {
+        return autoEmDashCb && autoEmDashCb->wantsAssets();
     }
 
     ushort findSymbolIndex(char c) const {
@@ -2812,6 +2822,7 @@ public:
     MatrixSelectorView *symSel {nullptr};
     ColorPreviewView *preview {nullptr};
     TInputLine *autoSaveInput {nullptr};
+    FolderAssetsCheckBoxes *autoEmDashCb {nullptr};
     char autoSaveData[6] {};
     std::vector<std::string> symbolOptions;
 
@@ -3874,6 +3885,10 @@ public:
         pendingInitialViewportReset = true;
     }
 
+    void setAutoEmDashFromDoubleHyphen(bool enabled) {
+        autoEmDashFromDoubleHyphen = enabled;
+    }
+
     struct UndoSnapshot {
         std::string text;
         uint curPtr {0};
@@ -4188,11 +4203,26 @@ public:
         if (!restoringSnapshot && mayModify)
             before = makeUndoSnapshot();
         const bool typingLike = isTypingLikeKey(event);
+        const bool typedPlainHyphen = (event.what == evKeyDown && event.keyDown.textLength == 1 &&
+                                       event.keyDown.text[0] == '-' &&
+                                       (event.keyDown.controlKeyState & kbCtrlShift) == 0);
         const int oldDy = delta.y;
         const int oldDx = delta.x;
         TFileEditor::handleEvent(event);
         if (delta.x != 0)
             scrollTo(0, delta.y);
+        if (autoEmDashFromDoubleHyphen && typedPlainHyphen && curPtr >= 2) {
+            const uint p0 = prevChar(prevChar(curPtr));
+            const uint p1 = prevChar(curPtr);
+            const char c0 = (char)bufChar(p0);
+            const char c1 = (char)bufChar(p1);
+            if (c0 == '-' && c1 == '-') {
+                // Reemplaza solo el par recien tipeado para mantener la edicion predecible.
+                deleteRange(p0, curPtr, True);
+                static const char emDash[] = "\xE2\x80\x94"; // UTF-8: —
+                insertText(emDash, (uint)sizeof(emDash) - 1u, False);
+            }
+        }
         if (!restoringSnapshot && mayModify) {
             std::string after = makeSnapshotText();
             if (after != before.text) {
@@ -4240,6 +4270,7 @@ private:
     std::vector<UndoSnapshot> undoSnapshots;
     bool restoringSnapshot {false};
     bool pendingInitialViewportReset {true};
+    bool autoEmDashFromDoubleHyphen {false};
 };
 
 /** Marco del editor con borde simple siempre (activo/inactivo), manteniendo eventos normales de TFrame. */
@@ -4979,6 +5010,8 @@ private:
     bool editorBold {true};
     /** Segundos entre autoguardados del editor (0 = desactivado). appearance.cfg: autoSaveIntervalSec */
     int autoSaveIntervalSec {60};
+    /** Si esta activo, al escribir "--" se convierte a guion largo Unicode (—). */
+    bool autoEmDashFromDoubleHyphen {false};
     TTimerId autoSaveTimer {nullptr};
     /** Caracter literal del fondo del escritorio. */
     char desktopPatternChar {'\xb0'};
@@ -5192,6 +5225,8 @@ private:
                 editorBold = parseIntClamped(val, 0, 1, editorBold ? 1 : 0) != 0;
             else if (key == "autoSaveIntervalSec")
                 autoSaveIntervalSec = parseIntClamped(val, 0, 7200, autoSaveIntervalSec);
+            else if (key == "autoEmDashFromDoubleHyphen")
+                autoEmDashFromDoubleHyphen = parseIntClamped(val, 0, 1, autoEmDashFromDoubleHyphen ? 1 : 0) != 0;
 #if !defined(_WIN32)
             else if (key == "kittyCellHeightPx")
                 kittySavedCellHeightPx = parseIntClamped(val, 0, 256, kittySavedCellHeightPx);
@@ -5214,6 +5249,7 @@ private:
 #endif
         out << "editorBold " << (editorBold ? 1 : 0) << "\n";
         out << "autoSaveIntervalSec " << autoSaveIntervalSec << "\n";
+        out << "autoEmDashFromDoubleHyphen " << (autoEmDashFromDoubleHyphen ? 1 : 0) << "\n";
 #if !defined(_WIN32)
         if (kittyZoomPersistenceEnabled()) {
             if (terminalIsKitty()) {
@@ -6633,8 +6669,10 @@ private:
             deskTop->setCurrent(editorWindow, normalSelect);
         /* Al abrir archivo nuevo/largo, asegurar vista desde columna 0 (evita "recorte" visual inicial). */
         if (editorWindow && editorWindow->editor) {
-            if (auto *re = dynamic_cast<RetroFileEditor *>(editorWindow->editor))
+            if (auto *re = dynamic_cast<RetroFileEditor *>(editorWindow->editor)) {
                 re->requestInitialViewportReset();
+                re->setAutoEmDashFromDoubleHyphen(autoEmDashFromDoubleHyphen);
+            }
             editorWindow->editor->scrollTo(0, 0);
             editorWindow->editor->drawView();
         }
@@ -7132,7 +7170,7 @@ private:
     void showPreferencesDialog() {
         loadAppearancePreferences();
         AppearanceDialog *d = new AppearanceDialog(TRect(2, 2, 88, 20), textColor, backColor,
-            desktopPatternChar, desktopPatternUtf8, autoSaveIntervalSec);
+            desktopPatternChar, desktopPatternUtf8, autoSaveIntervalSec, autoEmDashFromDoubleHyphen);
 
         ushort res = deskTop->execView(d);
         if (res == cmOK) {
@@ -7141,6 +7179,7 @@ private:
             desktopPatternChar = d->currentSymbol();
             desktopPatternUtf8 = d->currentSymbolUtf8();
             autoSaveIntervalSec = d->takeAutoSaveIntervalSec();
+            autoEmDashFromDoubleHyphen = d->takeAutoEmDashEnabled();
             saveAppearancePreferences();
             fillPaletteExplicit(textColor, backColor, paletteBytes);
             appPaletteDirty = true;
@@ -7152,6 +7191,10 @@ private:
             ensureEditorAboveNavigator();
             if (editorWindow)
                 editorWindow->redraw();
+            if (editorWindow && editorWindow->editor) {
+                if (auto *re = dynamic_cast<RetroFileEditor *>(editorWindow->editor))
+                    re->setAutoEmDashFromDoubleHyphen(autoEmDashFromDoubleHyphen);
+            }
             if (navWindow)
                 navWindow->redraw();
             if (previewWindow)
