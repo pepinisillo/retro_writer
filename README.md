@@ -10,8 +10,6 @@ Editor TUI (terminal) para escritura y manejo de recursos visuales, **construido
 - Diálogos para gestión de biblioteca visual y escena por capítulo.
 - Persistencia de apariencia, layout y sesión.
 
-**Repositorio:** [https://github.com/pepinisillo/retro_writer](https://github.com/pepinisillo/retro_writer)
-
 ---
 
 ## 1) Tecnologías usadas
@@ -191,6 +189,8 @@ En la barra de estado **se reflejan** los atajos activos.
 `appearance.cfg`, `workspace.cfg` y `visuals.cfg` **son** archivos de configuración (texto): **no** **forman parte** del binario ni **se generan** con el build; **se crean o actualizan** al ejecutar la app y usar preferencias, layout o visuales.
 
 ### `appearance.cfg`
+
+<img width="1202" height="591" alt="region-20260517-230654" src="https://github.com/user-attachments/assets/dab414f9-0ed3-4ab2-bc84-0c64a2be2624" />
 
 **Se almacenan** preferencias visuales y de render:
 
