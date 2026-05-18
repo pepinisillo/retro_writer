@@ -1,4 +1,5 @@
 # retro_writer_tv
+<img width="1920" height="1080" alt="full-20260516-230543" src="https://github.com/user-attachments/assets/be3cf54e-eb51-4686-8985-d82c032cd0d4" />
 
 Editor TUI (terminal) para escritura y manejo de recursos visuales, **construido** sobre **Turbo Vision**.
 
