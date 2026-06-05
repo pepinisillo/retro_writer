@@ -6465,9 +6465,21 @@ private:
             previewWindow3->frame->drawView();
     }
 
+    bool miniPreviewSixelEffective() const noexcept {
+#ifdef HAVE_LIBSIXEL
+#if !defined(_WIN32)
+        if (kittyUnicodePlaceholdersEnabled(miniPreviewKittyNative))
+            return false;
+#endif
+        return miniPreviewSixel && sixelOptInFromEnv();
+#else
+        return false;
+#endif
+    }
+
     void scheduleMiniSixelRepaint() {
 #ifdef HAVE_LIBSIXEL
-        if (miniPreviewSixel && sixelOptInFromEnv() && miniSixelOverlayDepth == 0)
+        if (miniPreviewSixelEffective() && miniSixelOverlayDepth == 0)
             miniSixelRepaintPending = true;
 #endif
     }
@@ -6477,7 +6489,7 @@ private:
         if (!miniSixelRepaintPending)
             return;
         miniSixelRepaintPending = false;
-        if (!miniPreviewSixel || !sixelOptInFromEnv() || miniSixelOverlayDepth != 0)
+        if (!miniPreviewSixelEffective() || miniSixelOverlayDepth != 0)
             return;
         if (previewPixelView)
             previewPixelView->drawView();
@@ -6514,14 +6526,15 @@ private:
 
     void beginMiniSixelOverlay() {
 #ifdef HAVE_LIBSIXEL
-        if (miniPreviewSixel && sixelOptInFromEnv()) {
+        if (miniPreviewSixelEffective()) {
             miniSixelRepaintPending = false;
             clearMiniSixelAreaForView(previewPixelView);
             clearMiniSixelAreaForView(previewPixelView2);
             clearMiniSixelAreaForView(previewPixelView3);
             THardwareInfo::flushScreen();
         }
-        ++miniSixelOverlayDepth;
+        if (miniPreviewSixelEffective())
+            ++miniSixelOverlayDepth;
 #endif
     }
 
