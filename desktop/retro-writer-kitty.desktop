@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=RetroWriter
+Comment=Retro Writer in Kitty
+Exec=/home/pepin/Downloads/retro_writer/run_kitty.sh
+Path=/home/pepin/Downloads/retro_writer
+Terminal=false
+Categories=Utility;TextEditor;

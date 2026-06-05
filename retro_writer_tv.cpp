@@ -4618,6 +4618,7 @@ public:
             layoutIdleSaves = 0;
             saveWorkspaceSession();
         }
+        repaintMiniSixelIfPending();
     }
 
     virtual void shutDown() override {
@@ -4665,11 +4666,14 @@ public:
     }
 
     virtual void handleEvent(TEvent &event) {
+        const ushort incomingWhat = event.what;
 
         if (event.what == evMouseWheel && navListView && (navListView->state & sfFocused) != 0) {
             navListView->handleEvent(event);
-            if (event.what == evNothing)
+            if (event.what == evNothing) {
+                scheduleMiniSixelRepaint();
                 return;
+            }
         }
 
         if (event.what == evCommand && event.message.command == cmQuit) {
@@ -4813,6 +4817,9 @@ public:
         }
 
         TApplication::handleEvent(event);
+        if (incomingWhat == evMouseDown || incomingWhat == evKeyDown || incomingWhat == evCommand ||
+            incomingWhat == evBroadcast)
+            scheduleMiniSixelRepaint();
         if (event.what != evCommand) return;
 
         switch (event.message.command) {
@@ -4990,8 +4997,10 @@ private:
     std::vector<uint8_t> miniPreviewRgb3;
     int miniPreviewImgW3 {0};
     int miniPreviewImgH3 {0};
-    /** Salida Sixel solo con RETRO_WRITER_ALLOW_SIXEL + esta opcion; 0 = bloques U+2580 o Kitty nativo. */
+    /** Salida Sixel si el binario trae libsixel; 0 = bloques U+2580 o Kitty nativo. */
     bool miniPreviewSixel {false};
+    /** Sixel vive fuera del buffer de Turbo Vision; se reemite tras repintados que pueden rasparlo. */
+    bool miniSixelRepaintPending {false};
     /** Kitty: imagen RGB en calidad de celda + placeholders Unicode (no capa flotante sobre el TUI). */
 #if !defined(_WIN32)
     bool miniPreviewKittyNative {true};
@@ -6313,6 +6322,29 @@ private:
             previewWindow2->frame->drawView();
         if (previewWindow3 && previewWindow3->frame)
             previewWindow3->frame->drawView();
+    }
+
+    void scheduleMiniSixelRepaint() {
+#ifdef HAVE_LIBSIXEL
+        if (miniPreviewSixel && sixelOptInFromEnv())
+            miniSixelRepaintPending = true;
+#endif
+    }
+
+    void repaintMiniSixelIfPending() {
+#ifdef HAVE_LIBSIXEL
+        if (!miniSixelRepaintPending)
+            return;
+        miniSixelRepaintPending = false;
+        if (!miniPreviewSixel || !sixelOptInFromEnv())
+            return;
+        if (previewPixelView)
+            previewPixelView->drawView();
+        if (previewPixelView2)
+            previewPixelView2->drawView();
+        if (previewPixelView3)
+            previewPixelView3->drawView();
+#endif
     }
 
     void captureLayoutToStored() {
