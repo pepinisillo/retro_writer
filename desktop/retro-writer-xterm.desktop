@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=RetroWriter
+Comment=Retro Writer in xterm/Sixel
+Exec=/home/pepin/Downloads/retro_writer/run_xterm_sixel.sh
+Path=/home/pepin/Downloads/retro_writer
+Terminal=false
+Categories=Utility;TextEditor;

@@ -250,8 +250,8 @@ El pipeline **se selecciona** según entorno/configuración:
 - `RETRO_WRITER_KITTY_SAVE_ZOOM=0`  
   **Se desactiva** la persistencia del zoom (altura de celda) en Kitty.
 
-- `RETRO_WRITER_ALLOW_SIXEL=1`  
-  **Se permite** Sixel si la app y el terminal lo soportan.
+- `RETRO_WRITER_DISABLE_SIXEL=1`  
+  **Se desactiva** Sixel aunque `miniPreviewSixel` este activo.
 
 - `RETRO_WRITER_FORCE_SIXEL=1`  
   **Se fuerza** la vía Sixel cuando sea posible.
@@ -308,7 +308,8 @@ Recomendación práctica: **dividir** `retro_writer_tv.cpp` en módulos (`editor
 
 - **Sixel no aparece**
   - **Debe compilarse** con `libsixel`.
-  - **Debe habilitarse** `miniPreviewSixel 1` y `RETRO_WRITER_ALLOW_SIXEL=1`.
+  - **Debe habilitarse** `miniPreviewSixel 1`.
+  - En xterm, **debe iniciarse** con soporte Sixel (por ejemplo `xterm -ti vt340`).
 
 - **Layout raro al abrir**
   - **Debe revisarse** `workspace.cfg`.

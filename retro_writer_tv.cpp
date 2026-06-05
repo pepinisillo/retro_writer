@@ -694,15 +694,18 @@ static bool encodeRgbToSixel(const std::vector<uint8_t> &rgb, int w, int h, int 
     return st == SIXEL_OK && !out.empty();
 }
 
-/** Sixel solo con RETRO_WRITER_ALLOW_SIXEL / FORCE_SIXEL=1 y miniPreviewSixel; sin emulador compatible se vería basura en pantalla. */
+/** Sixel queda gobernado por miniPreviewSixel; esta env solo permite apagarlo rapido si un terminal imprime basura. */
 static bool sixelOptInFromEnv() noexcept {
+    if (const char *d = std::getenv("RETRO_WRITER_DISABLE_SIXEL"))
+        if (d[0] == '1' && d[1] == '\0')
+            return false;
     if (const char *a = std::getenv("RETRO_WRITER_ALLOW_SIXEL"))
         if (a[0] == '1' && a[1] == '\0')
             return true;
     if (const char *f = std::getenv("RETRO_WRITER_FORCE_SIXEL"))
         if (f[0] == '1' && f[1] == '\0')
             return true;
-    return false;
+    return true;
 }
 
 static void emitSixelAtViewOrigin(TView &view, const std::string &sixel) {
@@ -2974,6 +2977,27 @@ public:
 #endif
                 return;
             }
+#ifdef HAVE_LIBSIXEL
+            if (useSixelMini && sixelOptInFromEnv()) {
+                int tw = 0;
+                int th = 0;
+                miniPreviewGridToPixels((int)size.x, (int)size.y, 2048, tw, th);
+                std::vector<uint8_t> scaled;
+                compositeRgbCenteredCover(cachedRgb, imgW, imgH, scaled, tw, th);
+                std::string sixel;
+                const int pc = std::clamp(sixelPaletteColors, 16, 256);
+                if (encodeRgbToSixel(scaled, tw, th, pc, sixel)) {
+                    const TColorAttr clearAttr{bgD, bgD};
+                    for (short y = 0; y < size.y; ++y) {
+                        b.moveChar(0, ' ', clearAttr, size.x);
+                        writeLine(0, y, size.x, 1, b);
+                    }
+                    THardwareInfo::flushScreen();
+                    emitSixelAtViewOrigin(*this, sixel);
+                    return;
+                }
+            }
+#endif
         } else {
             for (short y = 0; y < size.y; ++y) {
                 for (short x = 0; x < size.x; ++x) {
@@ -3027,21 +3051,6 @@ public:
             }
             writeLine(0, y, size.x, 1, b);
         }
-#ifdef HAVE_LIBSIXEL
-        if (useSixelMini && sixelOptInFromEnv()) {
-            int tw = 0;
-            int th = 0;
-            miniPreviewGridToPixels((int)size.x, (int)size.y, 2048, tw, th);
-            std::vector<uint8_t> scaled;
-            compositeRgbCenteredCover(cachedRgb, imgW, imgH, scaled, tw, th);
-            std::string sixel;
-            const int pc = std::clamp(sixelPaletteColors, 16, 256);
-            if (encodeRgbToSixel(scaled, tw, th, pc, sixel)) {
-                THardwareInfo::flushScreen();
-                emitSixelAtViewOrigin(*this, sixel);
-            }
-        }
-#endif
     }
 
     ~LibraryImagePreview() override {
@@ -3510,6 +3519,30 @@ public:
 #endif
                 return;
             }
+#ifdef HAVE_LIBSIXEL
+            if (useSixelMini && sixelOptInFromEnv() && !useKittyPh) {
+                int tw = 0;
+                int th = 0;
+                miniPreviewGridToPixels((int)size.x, (int)size.y, 2048, tw, th);
+                std::vector<uint8_t> scaled;
+                compositeRgbCenteredCover(*imageRgb, imgW, imgH, scaled, tw, th);
+                std::string sixel;
+                const int pc = std::clamp(sixelPaletteColors, 16, 256);
+                if (encodeRgbToSixel(scaled, tw, th, pc, sixel)) {
+                    const ushort bg = bgColor ? (*bgColor & 0xFF) : ushort(1);
+                    const TColorRGB rgbBg = XTerm256toRGB((uint8_t)bg);
+                    const TColorDesired bgD{rgbBg};
+                    const TColorAttr clearAttr{bgD, bgD};
+                    for (short y = 0; y < size.y; ++y) {
+                        b.moveChar(0, ' ', clearAttr, size.x);
+                        writeLine(0, y, size.x, 1, b);
+                    }
+                    THardwareInfo::flushScreen();
+                    emitSixelAtViewOrigin(*this, sixel);
+                    return;
+                }
+            }
+#endif
 
             const int bands = 2 * sy;
             const float imgWf = static_cast<float>(imgW);
@@ -3553,22 +3586,6 @@ public:
                 }
                 writeLine(0, y, size.x, 1, b);
             }
-#ifdef HAVE_LIBSIXEL
-            /* Sin opt-in de Sixel no se reescala ni codifica (ruido en TTY y trabajo innecesario). */
-            if (useSixelMini && sixelOptInFromEnv() && !useKittyPh) {
-                int tw = 0;
-                int th = 0;
-                miniPreviewGridToPixels((int)size.x, (int)size.y, 2048, tw, th);
-                std::vector<uint8_t> scaled;
-                compositeRgbCenteredCover(*imageRgb, imgW, imgH, scaled, tw, th);
-                std::string sixel;
-                const int pc = std::clamp(sixelPaletteColors, 16, 256);
-                if (encodeRgbToSixel(scaled, tw, th, pc, sixel)) {
-                    THardwareInfo::flushScreen();
-                    emitSixelAtViewOrigin(*this, sixel);
-                }
-            }
-#endif
             return;
         }
 
@@ -4725,6 +4742,7 @@ public:
             layoutIdleSaves = 0;
             saveWorkspaceSession();
         }
+        repaintMiniSixelIfPending();
     }
 
     virtual void shutDown() override {
@@ -4772,11 +4790,14 @@ public:
     }
 
     virtual void handleEvent(TEvent &event) {
+        const ushort incomingWhat = event.what;
 
         if (event.what == evMouseWheel && navListView && (navListView->state & sfFocused) != 0) {
             navListView->handleEvent(event);
-            if (event.what == evNothing)
+            if (event.what == evNothing) {
+                scheduleMiniSixelRepaint();
                 return;
+            }
         }
 
         if (event.what == evCommand && event.message.command == cmQuit) {
@@ -4877,7 +4898,9 @@ public:
                         TMenu *menu = new TMenu(*chain);
                         TMenuPopup *popup = new TMenuPopup(bounds, menu);
                         rwAutoPlaceMenuPopupOnDesk(desk, popup, p);
+                        beginMiniSixelOverlay();
                         const ushort cmd = desk->execView(popup);
+                        endMiniSixelOverlay();
                         TObject::destroy(popup);
                         if (cmd == cmNavMoveTrash) {
                             const ushort ans = messageBox(mfConfirmation | mfYesButton | mfNoButton,
@@ -4919,7 +4942,17 @@ public:
             return;
         }
 
+        const bool topMenuEvent =
+            (event.what == evKeyDown && event.keyDown.keyCode == kbF10) ||
+            (event.what == evMouseDown && event.mouse.where.y == 0);
+        if (topMenuEvent)
+            beginMiniSixelOverlay();
         TApplication::handleEvent(event);
+        if (topMenuEvent)
+            endMiniSixelOverlay();
+        if (incomingWhat == evMouseDown || incomingWhat == evKeyDown || incomingWhat == evCommand ||
+            incomingWhat == evBroadcast)
+            scheduleMiniSixelRepaint();
         if (event.what != evCommand) return;
 
         switch (event.message.command) {
@@ -5101,8 +5134,11 @@ private:
     std::vector<uint8_t> miniPreviewRgb3;
     int miniPreviewImgW3 {0};
     int miniPreviewImgH3 {0};
-    /** Salida Sixel solo con RETRO_WRITER_ALLOW_SIXEL + esta opcion; 0 = bloques U+2580 o Kitty nativo. */
+    /** Salida Sixel si el binario trae libsixel; 0 = bloques U+2580 o Kitty nativo. */
     bool miniPreviewSixel {false};
+    /** Sixel vive fuera del buffer de Turbo Vision; se reemite tras repintados que pueden rasparlo. */
+    bool miniSixelRepaintPending {false};
+    int miniSixelOverlayDepth {0};
     /** Kitty: imagen RGB en calidad de celda + placeholders Unicode (no capa flotante sobre el TUI). */
 #if !defined(_WIN32)
     bool miniPreviewKittyNative {true};
@@ -5586,7 +5622,7 @@ private:
                 if (pvC3) pvC3->drawView();
             };
 
-            const ushort res = deskTop->execView(d);
+            const ushort res = execViewWithMiniSixelHidden(d);
 
             bgId = readId(lvBgId);
             c2Id = readId(lvC2Id);
@@ -5844,7 +5880,7 @@ private:
             d->setPickTarget(deskTop, &visualLibrary.characters, idCharBuf, inIdC);
 
             d->setCurrent(inPathC, normalSelect);
-            const ushort res = deskTop->execView(d);
+            const ushort res = execViewWithMiniSixelHidden(d);
 
             inPathC->getData(static_cast<void *>(pathCharBuf));
             inPathB->getData(static_cast<void *>(pathBgBuf));
@@ -6069,7 +6105,7 @@ private:
 
             TColorAttr prevShadowAttr = shadowAttr;
             shadowAttr = TColorAttr(0x00);
-            const ushort res = deskTop->execView(d);
+            const ushort res = execViewWithMiniSixelHidden(d);
             shadowAttr = prevShadowAttr;
             rb->getData(&kindSel);
             destroy(d);
@@ -6427,6 +6463,81 @@ private:
             previewWindow2->frame->drawView();
         if (previewWindow3 && previewWindow3->frame)
             previewWindow3->frame->drawView();
+    }
+
+    void scheduleMiniSixelRepaint() {
+#ifdef HAVE_LIBSIXEL
+        if (miniPreviewSixel && sixelOptInFromEnv() && miniSixelOverlayDepth == 0)
+            miniSixelRepaintPending = true;
+#endif
+    }
+
+    void repaintMiniSixelIfPending() {
+#ifdef HAVE_LIBSIXEL
+        if (!miniSixelRepaintPending)
+            return;
+        miniSixelRepaintPending = false;
+        if (!miniPreviewSixel || !sixelOptInFromEnv() || miniSixelOverlayDepth != 0)
+            return;
+        if (previewPixelView)
+            previewPixelView->drawView();
+        if (previewPixelView2)
+            previewPixelView2->drawView();
+        if (previewPixelView3)
+            previewPixelView3->drawView();
+#endif
+    }
+
+    void clearMiniSixelAreaForView(TView *v) {
+#ifdef HAVE_LIBSIXEL
+        if (!v)
+            return;
+        const TRect e = v->getExtent();
+        const int w = std::max(0, (int)e.b.x - (int)e.a.x);
+        const int h = std::max(0, (int)e.b.y - (int)e.a.y);
+        if (w <= 0 || h <= 0)
+            return;
+        const TPoint g = v->makeGlobal(TPoint{0, 0});
+        const std::string blanks((size_t)w, ' ');
+        tvision::ConsoleCtl &con = tvision::ConsoleCtl::getInstance();
+        for (int y = 0; y < h; ++y) {
+            char cup[64];
+            const int n = std::snprintf(cup, sizeof(cup), "\033[%d;%dH", (int)g.y + y + 1, (int)g.x + 1);
+            if (n > 0) {
+                con.write(cup, static_cast<size_t>(n));
+                con.write(blanks.data(), blanks.size());
+            }
+        }
+        THardwareInfo::forgetCaretPosition();
+#endif
+    }
+
+    void beginMiniSixelOverlay() {
+#ifdef HAVE_LIBSIXEL
+        if (miniPreviewSixel && sixelOptInFromEnv()) {
+            miniSixelRepaintPending = false;
+            clearMiniSixelAreaForView(previewPixelView);
+            clearMiniSixelAreaForView(previewPixelView2);
+            clearMiniSixelAreaForView(previewPixelView3);
+            THardwareInfo::flushScreen();
+        }
+        ++miniSixelOverlayDepth;
+#endif
+    }
+
+    void endMiniSixelOverlay() {
+#ifdef HAVE_LIBSIXEL
+        if (miniSixelOverlayDepth > 0)
+            --miniSixelOverlayDepth;
+        scheduleMiniSixelRepaint();
+#endif
+    }
+
+    ushort execViewWithMiniSixelHidden(TView *v) {
+        beginMiniSixelOverlay();
+        const ushort res = deskTop ? deskTop->execView(v) : cmCancel;
+        endMiniSixelOverlay();
+        return res;
     }
 
     void captureLayoutToStored() {
@@ -7188,7 +7299,7 @@ private:
         AppearanceDialog *d = new AppearanceDialog(TRect(2, 2, 88, 20), textColor, backColor,
             desktopPatternChar, desktopPatternUtf8, autoSaveIntervalSec, autoEmDashFromDoubleHyphen);
 
-        ushort res = deskTop->execView(d);
+        ushort res = execViewWithMiniSixelHidden(d);
         if (res == cmOK) {
             textColor = d->currentFg();
             backColor = d->currentBg();
@@ -7327,7 +7438,7 @@ private:
         d->insert(new TButton(TRect(58, 17, 74, 19), "Guardar", cmOK, bfDefault));
         d->insert(new TButton(TRect(76, 17, 92, 19), "Cancelar", cmCancel, bfNormal));
 
-        ushort res = deskTop->execView(d);
+        ushort res = execViewWithMiniSixelHidden(d);
         if (res == cmOK) {
             endpointIn->getData(endpointBuf);
             endpoint2In->getData(endpoint2Buf);
@@ -7464,7 +7575,7 @@ private:
             destroy(d);
             return;
         }
-        ushort res = deskTop->execView(v);
+        ushort res = execViewWithMiniSixelHidden(v);
         ushort modeIdx = 999;
         char baseDirRaw[MAXPATH] = {};
         char folderRaw[MAX_TITLE - 1] = {};
@@ -7542,7 +7653,7 @@ private:
             destroy(dlg);
             return;
         }
-        ushort cmd = deskTop->execView(v2);
+        ushort cmd = execViewWithMiniSixelHidden(v2);
         ushort sel = 0;
         if (cmd == cmOK || cmd == cmIaPedirComentario)
             rb->getData(&sel);
@@ -7676,7 +7787,7 @@ private:
             destroy(d);
             return;
         }
-        deskTop->execView(v);
+        execViewWithMiniSixelHidden(v);
         destroy(v);
     }
 
@@ -8026,7 +8137,7 @@ std::string RetroWriterTVApp::browseImageFileAbs(const std::string &startDirHint
         d->insert(new CleanButton(TRect(74, 21, 88, 23), "Cancelar", cmCancel, false));
         d->setCurrent(lv, normalSelect);
 
-        const ushort res = deskTop->execView(d);
+        const ushort res = execViewWithMiniSixelHidden(d);
         NavigatorListView::NavItem picked {};
         const bool hasPick = lv->peekCursorItem(picked);
         destroy(d);
