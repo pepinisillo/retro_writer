@@ -694,15 +694,18 @@ static bool encodeRgbToSixel(const std::vector<uint8_t> &rgb, int w, int h, int 
     return st == SIXEL_OK && !out.empty();
 }
 
-/** Sixel solo con RETRO_WRITER_ALLOW_SIXEL / FORCE_SIXEL=1 y miniPreviewSixel; sin emulador compatible se vería basura en pantalla. */
+/** Sixel queda gobernado por miniPreviewSixel; esta env solo permite apagarlo rapido si un terminal imprime basura. */
 static bool sixelOptInFromEnv() noexcept {
+    if (const char *d = std::getenv("RETRO_WRITER_DISABLE_SIXEL"))
+        if (d[0] == '1' && d[1] == '\0')
+            return false;
     if (const char *a = std::getenv("RETRO_WRITER_ALLOW_SIXEL"))
         if (a[0] == '1' && a[1] == '\0')
             return true;
     if (const char *f = std::getenv("RETRO_WRITER_FORCE_SIXEL"))
         if (f[0] == '1' && f[1] == '\0')
             return true;
-    return false;
+    return true;
 }
 
 static void emitSixelAtViewOrigin(TView &view, const std::string &sixel) {
@@ -2963,6 +2966,27 @@ public:
 #endif
                 return;
             }
+#ifdef HAVE_LIBSIXEL
+            if (useSixelMini && sixelOptInFromEnv()) {
+                int tw = 0;
+                int th = 0;
+                miniPreviewGridToPixels((int)size.x, (int)size.y, 2048, tw, th);
+                std::vector<uint8_t> scaled;
+                compositeRgbCenteredCover(cachedRgb, imgW, imgH, scaled, tw, th);
+                std::string sixel;
+                const int pc = std::clamp(sixelPaletteColors, 16, 256);
+                if (encodeRgbToSixel(scaled, tw, th, pc, sixel)) {
+                    const TColorAttr clearAttr{bgD, bgD};
+                    for (short y = 0; y < size.y; ++y) {
+                        b.moveChar(0, ' ', clearAttr, size.x);
+                        writeLine(0, y, size.x, 1, b);
+                    }
+                    THardwareInfo::flushScreen();
+                    emitSixelAtViewOrigin(*this, sixel);
+                    return;
+                }
+            }
+#endif
         } else {
             for (short y = 0; y < size.y; ++y) {
                 for (short x = 0; x < size.x; ++x) {
@@ -3016,21 +3040,6 @@ public:
             }
             writeLine(0, y, size.x, 1, b);
         }
-#ifdef HAVE_LIBSIXEL
-        if (useSixelMini && sixelOptInFromEnv()) {
-            int tw = 0;
-            int th = 0;
-            miniPreviewGridToPixels((int)size.x, (int)size.y, 2048, tw, th);
-            std::vector<uint8_t> scaled;
-            compositeRgbCenteredCover(cachedRgb, imgW, imgH, scaled, tw, th);
-            std::string sixel;
-            const int pc = std::clamp(sixelPaletteColors, 16, 256);
-            if (encodeRgbToSixel(scaled, tw, th, pc, sixel)) {
-                THardwareInfo::flushScreen();
-                emitSixelAtViewOrigin(*this, sixel);
-            }
-        }
-#endif
     }
 
     ~LibraryImagePreview() override {
@@ -3499,6 +3508,30 @@ public:
 #endif
                 return;
             }
+#ifdef HAVE_LIBSIXEL
+            if (useSixelMini && sixelOptInFromEnv() && !useKittyPh) {
+                int tw = 0;
+                int th = 0;
+                miniPreviewGridToPixels((int)size.x, (int)size.y, 2048, tw, th);
+                std::vector<uint8_t> scaled;
+                compositeRgbCenteredCover(*imageRgb, imgW, imgH, scaled, tw, th);
+                std::string sixel;
+                const int pc = std::clamp(sixelPaletteColors, 16, 256);
+                if (encodeRgbToSixel(scaled, tw, th, pc, sixel)) {
+                    const ushort bg = bgColor ? (*bgColor & 0xFF) : ushort(1);
+                    const TColorRGB rgbBg = XTerm256toRGB((uint8_t)bg);
+                    const TColorDesired bgD{rgbBg};
+                    const TColorAttr clearAttr{bgD, bgD};
+                    for (short y = 0; y < size.y; ++y) {
+                        b.moveChar(0, ' ', clearAttr, size.x);
+                        writeLine(0, y, size.x, 1, b);
+                    }
+                    THardwareInfo::flushScreen();
+                    emitSixelAtViewOrigin(*this, sixel);
+                    return;
+                }
+            }
+#endif
 
             const int bands = 2 * sy;
             const float imgWf = static_cast<float>(imgW);
@@ -3542,22 +3575,6 @@ public:
                 }
                 writeLine(0, y, size.x, 1, b);
             }
-#ifdef HAVE_LIBSIXEL
-            /* Sin opt-in de Sixel no se reescala ni codifica (ruido en TTY y trabajo innecesario). */
-            if (useSixelMini && sixelOptInFromEnv() && !useKittyPh) {
-                int tw = 0;
-                int th = 0;
-                miniPreviewGridToPixels((int)size.x, (int)size.y, 2048, tw, th);
-                std::vector<uint8_t> scaled;
-                compositeRgbCenteredCover(*imageRgb, imgW, imgH, scaled, tw, th);
-                std::string sixel;
-                const int pc = std::clamp(sixelPaletteColors, 16, 256);
-                if (encodeRgbToSixel(scaled, tw, th, pc, sixel)) {
-                    THardwareInfo::flushScreen();
-                    emitSixelAtViewOrigin(*this, sixel);
-                }
-            }
-#endif
             return;
         }
 
