@@ -719,6 +719,9 @@ static void emitSixelAtViewOrigin(TView &view, const std::string &sixel) {
     tvision::ConsoleCtl &con = tvision::ConsoleCtl::getInstance();
     con.write(cup, static_cast<size_t>(n));
     con.write(sixel.data(), sixel.size());
+    /* xterm deja el cursor real al final del Sixel; ocultarlo evita el parpadeo dentro del mini. */
+    static constexpr const char *hideCursor = "\033[?25l";
+    con.write(hideCursor, std::strlen(hideCursor));
     THardwareInfo::forgetCaretPosition();
 }
 #endif
