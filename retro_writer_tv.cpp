@@ -717,11 +717,12 @@ static void emitSixelAtViewOrigin(TView &view, const std::string &sixel) {
     if (n <= 0)
         return;
     tvision::ConsoleCtl &con = tvision::ConsoleCtl::getInstance();
+    static constexpr const char *saveCursor = "\0337";
+    static constexpr const char *restoreCursor = "\0338";
+    con.write(saveCursor, std::strlen(saveCursor));
     con.write(cup, static_cast<size_t>(n));
     con.write(sixel.data(), sixel.size());
-    /* xterm deja el cursor real al final del Sixel; ocultarlo evita el parpadeo dentro del mini. */
-    static constexpr const char *hideCursor = "\033[?25l";
-    con.write(hideCursor, std::strlen(hideCursor));
+    con.write(restoreCursor, std::strlen(restoreCursor));
     THardwareInfo::forgetCaretPosition();
 }
 #endif
@@ -1963,11 +1964,7 @@ class NavigatorListView;
  * Antes se usaba putEvent (cola): al cerrar el dialogo modal el puntero a NavigatorListView quedaba invalido
  * o el broadcast se procesaba mal y la app podia colgarse. message() entrega en la misma pila.
  */
-static void postNavSelectEvent(NavigatorListView *src) noexcept {
-    if (!TProgram::application || !src)
-        return;
-    message(TProgram::application, evBroadcast, cmNavSelect, src);
-}
+static void postNavSelectEvent(NavigatorListView *src) noexcept;
 
 /** Extensiones que stb_image suele cargar (vista previa en selector de imagen). */
 static bool rwPathLooksLikeRasterImage(const std::string &path) {
@@ -2138,6 +2135,10 @@ public:
         if (cursor < 0 || cursor >= (int)items.size()) return false;
         out = items[(size_t)cursor];
         return true;
+    }
+
+    virtual bool navSelectStaysInOwner() const noexcept {
+        return false;
     }
 
     void setCursorByLabel(const std::string &label) {
@@ -2498,6 +2499,17 @@ private:
         clampScrollTop();
     }
 };
+
+static void postNavSelectEvent(NavigatorListView *src) noexcept {
+    if (!src)
+        return;
+    if (src->navSelectStaysInOwner() && src->owner) {
+        message(src->owner, evBroadcast, cmNavSelect, src);
+        return;
+    }
+    if (TProgram::application)
+        message(TProgram::application, evBroadcast, cmNavSelect, src);
+}
 
 /** Listado principal del panel de archivos: avisa al redimensionar para retitular/truncar la ruta. */
 class MainPanelNavigatorListView : public NavigatorListView {
@@ -3191,6 +3203,10 @@ public:
         NavigatorListView(bounds, themeText, themeBack) {
     }
 
+    bool navSelectStaysInOwner() const noexcept override {
+        return true;
+    }
+
     void handleEvent(TEvent &event) override {
         NavItem before {};
         const bool hadBefore = peekCursorItem(before);
@@ -3280,6 +3296,11 @@ public:
     }
 
     void handleEvent(TEvent &event) override {
+        if (event.what == evBroadcast && event.message.command == cmNavSelect && event.message.infoPtr == list) {
+            endModal(cmOK);
+            clearEvent(event);
+            return;
+        }
         if (event.what == evBroadcast && event.message.command == cmImageNavCursorChanged) {
             refreshFromSelection();
             clearEvent(event);
@@ -4581,6 +4602,7 @@ public:
         browserDir = absolutePath("/");
         lastEditorPath.clear();
         loadWorkspaceSession();
+        applySavedLayoutSnapshotAtStartup();
         reloadVisualLibraryFromDisk();
         reloadChapterSceneForEditorFile(lastEditorPath);
         if (pixelCanvas.size() != (size_t)kPixelGrid * (size_t)kPixelGrid)
@@ -4884,6 +4906,8 @@ public:
         }
         if (event.what == evBroadcast && event.message.command == cmNavSelect) {
             auto *src = static_cast<NavigatorListView *>(event.message.infoPtr);
+            if (src != navListView)
+                return;
             fileManagerActivate(src);
             clearEvent(event);
             return;
@@ -5839,42 +5863,36 @@ private:
                 d->insert(new TStaticText(TRect(xL, 20, xR, 21), TStringView(st.c_str(), (unsigned)st.size())));
             }
 
-            d->insert(new LibraryImagePreview(TRect(xL, 4, xMid, 12), &displayPathChar, &visualBaseDirAbs,
-                                              &visualLibrary.assetRootSubpath, &textColor, &backColor,
-#ifdef HAVE_LIBSIXEL
-                                              miniPreviewSixel,
-#else
-                                              false,
-#endif
+            LibraryImagePreview *prevChar = new LibraryImagePreview(TRect(xL, 4, xMid, 12), &displayPathChar, &visualBaseDirAbs,
+                                                                    &visualLibrary.assetRootSubpath, &textColor, &backColor,
+                                                                    false,
 #if !defined(_WIN32)
-                                              miniPreviewKittyNative,
+                                                                    miniPreviewKittyNative,
 #else
-                                              false,
+                                                                    false,
 #endif
 #ifdef HAVE_LIBSIXEL
-                                              miniPreviewSixelColors,
+                                                                    miniPreviewSixelColors,
 #else
-                                              256,
+                                                                    256,
 #endif
-                                              kKittyVisualLibImageId1, cmVisualBrowseCharPath));
-            d->insert(new LibraryImagePreview(TRect(xMid + 1, 4, xR, 12), &displayPathBg, &visualBaseDirAbs,
-                                              &visualLibrary.assetRootSubpath, &textColor, &backColor,
-#ifdef HAVE_LIBSIXEL
-                                              miniPreviewSixel,
-#else
-                                              false,
-#endif
+                                                                    kKittyVisualLibImageId1, cmVisualBrowseCharPath);
+            d->insert(prevChar);
+            LibraryImagePreview *prevBg = new LibraryImagePreview(TRect(xMid + 1, 4, xR, 12), &displayPathBg, &visualBaseDirAbs,
+                                                                  &visualLibrary.assetRootSubpath, &textColor, &backColor,
+                                                                  false,
 #if !defined(_WIN32)
-                                              miniPreviewKittyNative,
+                                                                  miniPreviewKittyNative,
 #else
-                                              false,
+                                                                  false,
 #endif
 #ifdef HAVE_LIBSIXEL
-                                              miniPreviewSixelColors,
+                                                                  miniPreviewSixelColors,
 #else
-                                              256,
+                                                                  256,
 #endif
-                                              kKittyVisualLibImageId2, cmVisualBrowseBgPath));
+                                                                  kKittyVisualLibImageId2, cmVisualBrowseBgPath);
+            d->insert(prevBg);
 
             inPathC->setData(static_cast<void *>(pathCharBuf));
             inPathB->setData(static_cast<void *>(pathBgBuf));
@@ -5889,6 +5907,8 @@ private:
             inPathB->getData(static_cast<void *>(pathBgBuf));
             inIdC->getData(static_cast<void *>(idCharBuf));
             inIdB->getData(static_cast<void *>(idBgBuf));
+            clearMiniSixelAreaForView(prevChar);
+            clearMiniSixelAreaForView(prevBg);
             destroy(d);
 
             draftPathChar = trim(std::string(pathCharBuf));
@@ -6354,6 +6374,22 @@ private:
         messageBox(mfInformation | mfOKButton, "Layout guardado.");
     }
 
+    void applySavedLayoutSnapshotAtStartup() {
+        if (!loadedSavedLayoutNavGeom && !loadedSavedLayoutEditorGeom &&
+            !loadedSavedLayoutMiniGeom[0] && !loadedSavedLayoutMiniGeom[1] && !loadedSavedLayoutMiniGeom[2])
+            return;
+        loadedNavGeom = loadedSavedLayoutNavGeom;
+        storedNavGeom = savedLayoutNavGeom;
+        for (int i = 0; i < 3; ++i) {
+            loadedMiniGeom[i] = loadedSavedLayoutMiniGeom[i];
+            storedMiniGeom[i] = savedLayoutMiniGeom[i];
+        }
+        loadedEditorGeom = loadedSavedLayoutEditorGeom;
+        storedEditorGeom = savedLayoutEditorGeom;
+        if (savedLayoutSplitY > 0)
+            sessionPanelSplitY = savedLayoutSplitY;
+    }
+
     void restoreLayoutSnapshotSlot() {
         if (!loadedSavedLayoutNavGeom && !loadedSavedLayoutEditorGeom &&
             !loadedSavedLayoutMiniGeom[0] && !loadedSavedLayoutMiniGeom[1] && !loadedSavedLayoutMiniGeom[2]) {
@@ -6468,6 +6504,17 @@ private:
             previewWindow3->frame->drawView();
     }
 
+    void clearMiniPreviewRasterResidue() {
+#ifdef HAVE_LIBSIXEL
+        if (miniPreviewSixelEffective()) {
+            clearMiniSixelAreaForView(previewPixelView);
+            clearMiniSixelAreaForView(previewPixelView2);
+            clearMiniSixelAreaForView(previewPixelView3);
+            THardwareInfo::flushScreen();
+        }
+#endif
+    }
+
     bool miniPreviewSixelEffective() const noexcept {
 #ifdef HAVE_LIBSIXEL
 #if !defined(_WIN32)
@@ -6515,6 +6562,10 @@ private:
         const TPoint g = v->makeGlobal(TPoint{0, 0});
         const std::string blanks((size_t)w, ' ');
         tvision::ConsoleCtl &con = tvision::ConsoleCtl::getInstance();
+        char bgSeq[32];
+        const int bgN = std::snprintf(bgSeq, sizeof(bgSeq), "\033[48;5;%dm", (int)(backColor & 0xFF));
+        if (bgN > 0)
+            con.write(bgSeq, static_cast<size_t>(bgN));
         for (int y = 0; y < h; ++y) {
             char cup[64];
             const int n = std::snprintf(cup, sizeof(cup), "\033[%d;%dH", (int)g.y + y + 1, (int)g.x + 1);
@@ -6523,6 +6574,8 @@ private:
                 con.write(blanks.data(), blanks.size());
             }
         }
+        static constexpr const char *resetAttrs = "\033[0m";
+        con.write(resetAttrs, std::strlen(resetAttrs));
         THardwareInfo::forgetCaretPosition();
 #endif
     }
@@ -7298,6 +7351,10 @@ private:
         }
 
         browserDir = absolutePath(it.fullPath);
+        visualGlobalBaseDirAbs = browserDir;
+        reloadVisualLibraryFromDisk();
+        reloadChapterSceneForEditorFile("");
+        reloadMiniPreviewImage();
 
         if (src == navListView) {
             syncFilePanelListing();
@@ -7306,6 +7363,9 @@ private:
             if (navListView)
                 navListView->setItems(buildFileManagerItems());
         }
+        clearMiniPreviewRasterResidue();
+        updateMiniPreviewWindowTitles();
+        redrawMiniPreviewOnly();
         saveWorkspaceSession();
     }
 
@@ -8156,6 +8216,7 @@ std::string RetroWriterTVApp::browseImageFileAbs(const std::string &startDirHint
         const ushort res = execViewWithMiniSixelHidden(d);
         NavigatorListView::NavItem picked {};
         const bool hasPick = lv->peekCursorItem(picked);
+        clearMiniSixelAreaForView(pv);
         destroy(d);
 
         if (res == cmCancel)
